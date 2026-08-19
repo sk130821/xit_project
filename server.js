@@ -15,7 +15,22 @@ import { startAutoRoiCron } from './jobs/autoRoiCron.js';
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+const corsOrigins = (process.env.CORS_ORIGINS || 'http://localhost:5173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.set('trust proxy', 1);
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || corsOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS blocked: ${origin}`));
+    }
+  },
+  credentials: true,
+}));
 app.use(express.json());
 
 app.get('/api/health', (req, res) => {
