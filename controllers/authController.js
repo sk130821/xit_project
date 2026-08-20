@@ -1,6 +1,8 @@
 import bcrypt from 'bcryptjs';
 import { pool } from '../db.js';
 import { generateUserToken } from '../middleware/auth.js';
+import { getSetting } from '../services/incomeService.js';
+import { getBlockchainConfig } from '../services/blockchainService.js';
 
 function generateReferralCode(userId) {
   const base = userId.toString(16).toUpperCase();
@@ -106,9 +108,15 @@ export async function signup(req, res) {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    const config = await getBlockchainConfig(pool);
+    let walletBalance = 0;
+    if (config.platformMode === 'demo') {
+      walletBalance = parseFloat(await getSetting(pool, 'demo_signup_usdt', '1000'));
+    }
+
     const [result] = await pool.query(
-      'INSERT INTO users (username, email, password, sponsor_id, referral_code) VALUES (?, ?, ?, ?, ?)',
-      [username, email, hashedPassword, sponsorId, 'TEMP']
+      'INSERT INTO users (username, email, password, sponsor_id, referral_code, wallet_balance) VALUES (?, ?, ?, ?, ?, ?)',
+      [username, email, hashedPassword, sponsorId, 'TEMP', walletBalance]
     );
 
     const userId = result.insertId;

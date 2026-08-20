@@ -148,6 +148,7 @@ INSERT INTO settings (setting_key, setting_value, description) VALUES
   ('flexible_lock_days', '365', 'Lock period for 20% locked in flexible plan'),
   ('min_purchase', '10', 'Minimum token purchase amount'),
   ('min_investment', '100', 'Minimum investment amount'),
+  ('demo_signup_usdt', '1000', 'Demo mode: USDT wallet for new signups and auto top-up'),
   ('admin_charge_percent', '10', 'Admin charge percentage on token sales'),
   ('bep20_contract_address', '', 'XIT BEP-20 token contract address'),
   ('payment_token_address', '', 'Payment token address (empty = native BNB)'),

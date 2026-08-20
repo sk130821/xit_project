@@ -47,11 +47,24 @@ export async function buyTokens(req, res) {
     const tokenPrice = parseFloat(await getSetting(conn, 'token_price', '1'));
     const usdtCost = tokenAmount * tokenPrice;
 
-    if (Number(user.wallet_balance) < usdtCost) {
-      await conn.rollback();
-      return res.status(400).json({
-        error: `Insufficient USDT balance. Need ${usdtCost.toFixed(2)} USDT, have ${Number(user.wallet_balance).toFixed(2)} USDT`,
-      });
+    let walletBalance = Number(user.wallet_balance);
+    if (walletBalance < usdtCost) {
+      if (config.platformMode === 'demo') {
+        const demoSignupUsdt = parseFloat(await getSetting(conn, 'demo_signup_usdt', '1000'));
+        const topUp = Math.max(usdtCost, demoSignupUsdt) - walletBalance;
+        if (topUp > 0) {
+          await conn.query(
+            'UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?',
+            [topUp, req.userId]
+          );
+          walletBalance += topUp;
+        }
+      } else {
+        await conn.rollback();
+        return res.status(400).json({
+          error: `Insufficient USDT balance. Need ${usdtCost.toFixed(2)} USDT, have ${walletBalance.toFixed(2)} USDT`,
+        });
+      }
     }
 
     await conn.query(
