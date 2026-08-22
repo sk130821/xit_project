@@ -31,8 +31,10 @@ export async function distributeReferralBonus(conn, buyerId, tokenAmount) {
   return bonus;
 }
 
-export async function distributeLevelBonus(conn, earnerId, roiAmount, investmentId) {
+export async function distributeLevelBonus(conn, earnerId, roiAmount, investmentId, payoutDate = null) {
   if (roiAmount <= 0) return 0;
+
+  const createdAt = payoutDate ? `${payoutDate} 00:30:00` : null;
 
   const [uplines] = await conn.query(
     `SELECT rr.upline_id, rr.level, lbr.percentage
@@ -57,51 +59,192 @@ export async function distributeLevelBonus(conn, earnerId, roiAmount, investment
     );
 
     await conn.query(
-      'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id) VALUES (?, ?, ?, ?, ?, ?)',
-      [upline.upline_id, 'level_bonus', bonus, `Level ${upline.level} ROI bonus`, earnerId, investmentId]
+      createdAt
+        ? 'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        : 'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id) VALUES (?, ?, ?, ?, ?, ?)',
+      createdAt
+        ? [upline.upline_id, 'level_bonus', bonus, `Level ${upline.level} ROI bonus`, earnerId, investmentId, createdAt]
+        : [upline.upline_id, 'level_bonus', bonus, `Level ${upline.level} ROI bonus`, earnerId, investmentId]
     );
   }
 
   return totalBonus;
 }
 
-export async function calculateRewardBonus(conn, userId, roiAmount) {
-  if (roiAmount <= 0) return { bonus: 0, tierName: null };
-
-  const [directStats] = await conn.query(
-    `SELECT COUNT(*) as direct_count, COALESCE(SUM(total_purchased), 0) as total_volume
-     FROM users WHERE sponsor_id = ?`,
-    [userId]
+export async function getDirectLegBusiness(conn, sponsorId) {
+  const [directs] = await conn.query(
+    'SELECT id, username, total_purchased FROM users WHERE sponsor_id = ? ORDER BY created_at',
+    [sponsorId]
   );
 
-  const directCount = Number(directStats[0].direct_count);
-  const totalVolume = Number(directStats[0].total_volume);
+  if (directs.length === 0) return [];
 
+  const ids = directs.map((d) => d.id);
+  const placeholders = ids.map(() => '?').join(',');
+
+  const [teamRows] = await conn.query(
+    `SELECT rr.upline_id AS direct_id, COALESCE(SUM(u.total_purchased), 0) AS team_business
+     FROM referral_relations rr
+     JOIN users u ON u.id = rr.user_id
+     WHERE rr.upline_id IN (${placeholders})
+     GROUP BY rr.upline_id`,
+    ids
+  );
+
+  const teamMap = Object.fromEntries(teamRows.map((r) => [r.direct_id, Number(r.team_business)]));
+
+  return directs.map((d) => {
+    const selfBusiness = Number(d.total_purchased || 0);
+    const teamBusiness = teamMap[d.id] || 0;
+    return {
+      user_id: d.id,
+      username: d.username,
+      self_business: selfBusiness,
+      team_business: teamBusiness,
+      total_business: selfBusiness + teamBusiness,
+    };
+  });
+}
+
+export async function getRewardTierQualification(conn, userId) {
+  const legs = await getDirectLegBusiness(conn, userId);
   const [tiers] = await conn.query('SELECT * FROM reward_tiers ORDER BY min_volume DESC');
 
-  for (const tier of tiers) {
-    if (directCount >= tier.required_directs && totalVolume >= Number(tier.min_volume)) {
-      const bonus = (roiAmount * Number(tier.percentage)) / 100;
-      return { bonus, tierName: tier.tier_name, tierId: tier.id, percentage: Number(tier.percentage) };
+  let currentTier = null;
+  const tierResults = tiers.map((tier) => {
+    const minVolume = Number(tier.min_volume);
+    const requiredDirects = Number(tier.required_directs);
+    const qualifyingLegs = legs.filter((leg) => leg.total_business >= minVolume);
+    const qualified = qualifyingLegs.length >= requiredDirects;
+
+    return {
+      tier,
+      qualified,
+      qualifying_count: qualifyingLegs.length,
+      qualifying_legs: qualifyingLegs,
+    };
+  });
+
+  for (const result of tierResults) {
+    if (result.qualified) {
+      currentTier = result.tier;
+      break;
     }
   }
 
-  return { bonus: 0, tierName: null };
+  return { legs, currentTier, tierResults };
 }
 
-export async function payRewardBonus(conn, userId, roiAmount, investmentId) {
-  const { bonus, tierName, percentage } = await calculateRewardBonus(conn, userId, roiAmount);
-  if (bonus <= 0) return 0;
+export async function getDirectLegRoot(conn, earnerId, sponsorId) {
+  let current = earnerId;
 
-  await conn.query(
-    'UPDATE users SET xit_balance = xit_balance + ?, total_earned = total_earned + ? WHERE id = ?',
-    [bonus, bonus, userId]
-  );
+  while (current) {
+    const [rows] = await conn.query('SELECT id, sponsor_id FROM users WHERE id = ?', [current]);
+    const user = rows[0];
+    if (!user) return null;
+    if (Number(user.sponsor_id) === Number(sponsorId)) {
+      return user.id;
+    }
+    if (!user.sponsor_id) return null;
+    current = user.sponsor_id;
+  }
 
-  await conn.query(
-    'INSERT INTO transactions (user_id, type, amount, description, investment_id) VALUES (?, ?, ?, ?, ?)',
-    [userId, 'reward_bonus', bonus, `Reward bonus (${tierName}, ${percentage}% of ROI)`, investmentId]
-  );
+  return null;
+}
 
-  return bonus;
+function legQualifiesForTier(legs, directLegId, tier) {
+  if (!tier) return false;
+  const leg = legs.find((l) => Number(l.user_id) === Number(directLegId));
+  return leg ? leg.total_business >= Number(tier.min_volume) : false;
+}
+
+export async function previewRewardBonus(conn, earnerId, roiAmount) {
+  if (roiAmount <= 0) return { bonus: 0, tierName: null };
+
+  let totalBonus = 0;
+  let currentId = earnerId;
+
+  while (true) {
+    const [rows] = await conn.query('SELECT sponsor_id FROM users WHERE id = ?', [currentId]);
+    const sponsorId = rows[0]?.sponsor_id;
+    if (!sponsorId) break;
+
+    const directLegId = await getDirectLegRoot(conn, earnerId, sponsorId);
+    if (directLegId) {
+      const { currentTier, legs } = await getRewardTierQualification(conn, sponsorId);
+      if (currentTier && legQualifiesForTier(legs, directLegId, currentTier)) {
+        totalBonus += (roiAmount * Number(currentTier.percentage)) / 100;
+      }
+    }
+
+    currentId = sponsorId;
+  }
+
+  return { bonus: totalBonus, tierName: null };
+}
+
+export async function distributeRewardBonus(conn, earnerId, roiAmount, investmentId, payoutDate = null) {
+  if (roiAmount <= 0) return 0;
+
+  const createdAt = payoutDate ? `${payoutDate} 00:30:00` : null;
+  let totalPaid = 0;
+  let currentId = earnerId;
+  let earnerName = null;
+
+  while (true) {
+    const [rows] = await conn.query('SELECT sponsor_id FROM users WHERE id = ?', [currentId]);
+    const sponsorId = rows[0]?.sponsor_id;
+    if (!sponsorId) break;
+
+    const directLegId = await getDirectLegRoot(conn, earnerId, sponsorId);
+    if (directLegId) {
+      const { currentTier, legs } = await getRewardTierQualification(conn, sponsorId);
+      if (currentTier && legQualifiesForTier(legs, directLegId, currentTier)) {
+        const percentage = Number(currentTier.percentage);
+        const bonus = (roiAmount * percentage) / 100;
+
+        if (bonus > 0) {
+          if (!earnerName) {
+            const [earnerRow] = await conn.query('SELECT username FROM users WHERE id = ?', [earnerId]);
+            earnerName = earnerRow[0]?.username || 'member';
+          }
+
+          await conn.query(
+            'UPDATE users SET xit_balance = xit_balance + ?, total_earned = total_earned + ? WHERE id = ?',
+            [bonus, bonus, sponsorId]
+          );
+
+          await conn.query(
+            createdAt
+              ? 'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+              : 'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id) VALUES (?, ?, ?, ?, ?, ?)',
+            createdAt
+              ? [
+                  sponsorId,
+                  'reward_bonus',
+                  bonus,
+                  `Reward bonus (${currentTier.tier_name}, ${percentage}% of ${earnerName} ROI)`,
+                  earnerId,
+                  investmentId,
+                  createdAt,
+                ]
+              : [
+                  sponsorId,
+                  'reward_bonus',
+                  bonus,
+                  `Reward bonus (${currentTier.tier_name}, ${percentage}% of ${earnerName} ROI)`,
+                  earnerId,
+                  investmentId,
+                ]
+          );
+
+          totalPaid += bonus;
+        }
+      }
+    }
+
+    currentId = sponsorId;
+  }
+
+  return totalPaid;
 }

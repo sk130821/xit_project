@@ -1,12 +1,12 @@
 import { pool } from '../db.js';
 import {
   distributeLevelBonus,
-  payRewardBonus,
-  calculateRewardBonus,
+  distributeRewardBonus,
+  previewRewardBonus,
 } from './incomeService.js';
 
-export function calculateInvestmentRoi(inv) {
-  const today = new Date().toISOString().split('T')[0];
+export function calculateInvestmentRoi(inv, asOfDate = null) {
+  const today = asOfDate || new Date().toISOString().split('T')[0];
   const lastRoi = new Date(inv.last_roi_date).toISOString().split('T')[0];
 
   if (lastRoi >= today) return null;
@@ -52,7 +52,11 @@ async function previewLevelBonus(conn, earnerId, roiAmount) {
   return total;
 }
 
-export async function previewPayout() {
+function txCreatedAt(payoutDate) {
+  return payoutDate ? `${payoutDate} 00:30:00` : null;
+}
+
+export async function previewPayout(asOfDate = null) {
   const conn = await pool.getConnection();
   try {
     const [investments] = await conn.query(
@@ -69,12 +73,12 @@ export async function previewPayout() {
     const items = [];
 
     for (const inv of investments) {
-      const calc = calculateInvestmentRoi(inv);
+      const calc = calculateInvestmentRoi(inv, asOfDate);
       if (!calc || calc.roi <= 0) continue;
 
       eligibleCount++;
       const levelBonus = await previewLevelBonus(conn, inv.user_id, calc.roi);
-      const reward = await calculateRewardBonus(conn, inv.user_id, calc.roi);
+      const reward = await previewRewardBonus(conn, inv.user_id, calc.roi);
 
       totalRoi += calc.roi;
       totalLevelBonus += levelBonus;
@@ -96,6 +100,8 @@ export async function previewPayout() {
 
     items.sort((a, b) => b.roiAmount - a.roiAmount);
 
+    const effectiveDate = asOfDate || new Date().toISOString().split('T')[0];
+
     return {
       eligibleInvestments: eligibleCount,
       totalInvestments: investments.length,
@@ -105,14 +111,15 @@ export async function previewPayout() {
       totalPayout: totalRoi + totalLevelBonus + totalRewardBonus,
       items: items.slice(0, 100),
       hasMore: items.length > 100,
+      payoutDate: effectiveDate,
     };
   } finally {
     conn.release();
   }
 }
 
-async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout') {
-  const calc = calculateInvestmentRoi(inv);
+async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout', asOfDate = null) {
+  const calc = calculateInvestmentRoi(inv, asOfDate);
   if (!calc) return null;
 
   if (calc.roi <= 0) {
@@ -123,6 +130,8 @@ async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout')
   }
 
   const totalClaimable = calc.roi;
+  const payoutDate = asOfDate || null;
+  const createdAt = txCreatedAt(payoutDate);
 
   await conn.query(
     'UPDATE users SET xit_balance = xit_balance + ?, total_earned = total_earned + ? WHERE id = ?',
@@ -131,19 +140,27 @@ async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout')
 
   const newRoiReceived = Number(inv.roi_received) + totalClaimable;
   const newStatus = newRoiReceived >= Number(inv.total_return) ? 'completed' : 'active';
+  const lastRoiDate = payoutDate || new Date().toISOString().split('T')[0];
 
   await conn.query(
-    'UPDATE investments SET roi_received = ?, last_roi_date = CURRENT_DATE(), status = ? WHERE id = ?',
-    [newRoiReceived, newStatus, inv.id]
+    'UPDATE investments SET roi_received = ?, last_roi_date = ?, status = ? WHERE id = ?',
+    [newRoiReceived, lastRoiDate, newStatus, inv.id]
   );
 
-  await conn.query(
-    'INSERT INTO transactions (user_id, type, amount, description, investment_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?)',
-    [inv.user_id, 'roi', totalClaimable, description, inv.id, 'demo']
-  );
+  if (createdAt) {
+    await conn.query(
+      'INSERT INTO transactions (user_id, type, amount, description, investment_id, on_chain_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [inv.user_id, 'roi', totalClaimable, description, inv.id, 'demo', createdAt]
+    );
+  } else {
+    await conn.query(
+      'INSERT INTO transactions (user_id, type, amount, description, investment_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?)',
+      [inv.user_id, 'roi', totalClaimable, description, inv.id, 'demo']
+    );
+  }
 
-  const levelBonus = await distributeLevelBonus(conn, inv.user_id, totalClaimable, inv.id);
-  const rewardBonus = await payRewardBonus(conn, inv.user_id, totalClaimable, inv.id);
+  const levelBonus = await distributeLevelBonus(conn, inv.user_id, totalClaimable, inv.id, payoutDate);
+  const rewardBonus = await distributeRewardBonus(conn, inv.user_id, totalClaimable, inv.id, payoutDate);
 
   return {
     investmentId: inv.id,
@@ -155,7 +172,7 @@ async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout')
   };
 }
 
-export async function runPayout({ runType = 'manual', triggeredBy = 'admin' } = {}) {
+export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asOfDate = null } = {}) {
   const conn = await pool.getConnection();
   let investmentsProcessed = 0;
   let totalRoi = 0;
@@ -167,13 +184,17 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin' } = 
       "SELECT * FROM investments WHERE status = 'active'"
     );
 
-    const description = runType === 'auto' ? 'Auto daily ROI (12 AM IST)' : 'Manual ROI payout by admin';
+    const description = asOfDate
+      ? `Demo ROI payout for ${asOfDate}`
+      : runType === 'auto'
+        ? 'Auto daily ROI (12 AM IST)'
+        : 'Manual ROI payout by admin';
 
     for (const inv of investments) {
       await conn.beginTransaction();
       try {
         const [locked] = await conn.query('SELECT * FROM investments WHERE id = ? FOR UPDATE', [inv.id]);
-        const result = await processInvestmentRoi(conn, locked[0], description);
+        const result = await processInvestmentRoi(conn, locked[0], description, asOfDate);
         await conn.commit();
 
         if (result && result.roi > 0) {
@@ -189,13 +210,14 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin' } = 
     }
 
     const totalPayout = totalRoi + totalLevelBonus + totalRewardBonus;
-    const today = new Date().toISOString().split('T')[0];
+    const runDate = asOfDate || new Date().toISOString().split('T')[0];
+    const effectiveRunType = asOfDate ? 'demo' : runType;
 
     const [runResult] = await pool.query(
       `INSERT INTO payout_runs
         (run_type, run_date, investments_processed, total_roi, total_level_bonus, total_reward_bonus, total_payout, triggered_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [runType, today, investmentsProcessed, totalRoi, totalLevelBonus, totalRewardBonus, totalPayout, triggeredBy]
+      [effectiveRunType, runDate, investmentsProcessed, totalRoi, totalLevelBonus, totalRewardBonus, totalPayout, triggeredBy]
     );
 
     return {
@@ -205,6 +227,7 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin' } = 
       totalLevelBonus,
       totalRewardBonus,
       totalPayout,
+      payoutDate: runDate,
     };
   } finally {
     conn.release();

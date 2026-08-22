@@ -1,5 +1,5 @@
 import { pool } from '../db.js';
-import { getSetting, distributeLevelBonus, payRewardBonus } from '../services/incomeService.js';
+import { getSetting, distributeLevelBonus, distributeRewardBonus } from '../services/incomeService.js';
 import { getBlockchainConfig, isBlockchainMode, sendTokenPayout } from '../services/blockchainService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
 
@@ -94,7 +94,7 @@ export async function claimRoi(req, res) {
     );
 
     const levelBonusTotal = await distributeLevelBonus(conn, req.userId, totalClaimable, investmentId);
-    const rewardBonus = await payRewardBonus(conn, req.userId, totalClaimable, investmentId);
+    const rewardBonus = await distributeRewardBonus(conn, req.userId, totalClaimable, investmentId);
 
     await conn.commit();
 

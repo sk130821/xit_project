@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "init-db": "node initDb.js && node scripts/seedAdmin.js"
+    "init-db": "node initDb.js && node scripts/seedAdmin.js",
+    "reset-members": "node scripts/resetMembersKeepOne.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

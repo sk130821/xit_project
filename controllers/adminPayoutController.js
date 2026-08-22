@@ -1,10 +1,58 @@
 import { pool } from '../db.js';
 import { previewPayout, runPayout } from '../services/payoutService.js';
+import { getBlockchainConfig } from '../services/blockchainService.js';
+
+function parsePayoutDate(raw) {
+  if (!raw) return { date: null };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return { error: 'Invalid date format. Use YYYY-MM-DD.' };
+  }
+  const parsed = new Date(`${raw}T12:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return { error: 'Invalid date.' };
+  }
+  return { date: raw };
+}
+
+async function resolvePayoutDate(req, { allowBody = false } = {}) {
+  const conn = await pool.getConnection();
+  try {
+    const config = await getBlockchainConfig(conn);
+    const rawDate = allowBody ? req.body?.payoutDate || req.query?.date : req.query?.date;
+
+    if (!rawDate) {
+      return { config, asOfDate: null };
+    }
+
+    if (config.platformMode !== 'demo') {
+      return { error: 'Custom payout date is only available in demo mode', status: 400 };
+    }
+
+    const parsed = parsePayoutDate(rawDate);
+    if (parsed.error) {
+      return { error: parsed.error, status: 400 };
+    }
+
+    return { config, asOfDate: parsed.date };
+  } finally {
+    conn.release();
+  }
+}
 
 export async function getPayoutPreview(req, res) {
   try {
-    const preview = await previewPayout();
-    res.json({ success: true, ...preview });
+    const resolved = await resolvePayoutDate(req);
+    if (resolved.error) {
+      return res.status(resolved.status).json({ error: resolved.error });
+    }
+
+    const preview = await previewPayout(resolved.asOfDate);
+
+    res.json({
+      success: true,
+      ...preview,
+      demoMode: resolved.config.platformMode === 'demo',
+    });
   } catch (err) {
     console.error('Payout preview error:', err);
     res.status(500).json({ error: 'Failed to generate payout preview' });
@@ -13,17 +61,24 @@ export async function getPayoutPreview(req, res) {
 
 export async function triggerPayout(req, res) {
   try {
-    const preview = await previewPayout();
+    const resolved = await resolvePayoutDate(req, { allowBody: true });
+    if (resolved.error) {
+      return res.status(resolved.status).json({ error: resolved.error });
+    }
+
+    const preview = await previewPayout(resolved.asOfDate);
     if (preview.eligibleInvestments === 0) {
-      return res.status(400).json({ error: 'No eligible investments for payout today' });
+      const dateLabel = resolved.asOfDate || 'today';
+      return res.status(400).json({ error: `No eligible investments for payout on ${dateLabel}` });
     }
 
     const result = await runPayout({
       runType: 'manual',
       triggeredBy: req.adminEmail || 'admin',
+      asOfDate: resolved.asOfDate,
     });
 
-    res.json({ success: true, ...result, preview });
+    res.json({ success: true, ...result, preview, demoMode: resolved.config.platformMode === 'demo' });
   } catch (err) {
     console.error('Manual payout error:', err);
     res.status(500).json({ error: 'Payout failed' });
