@@ -1,8 +1,18 @@
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { pool } from '../db.js';
 import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
 import { getBlockchainConfig } from '../services/blockchainService.js';
+import { sendPasswordResetEmail } from '../services/emailService.js';
+
+function hashResetToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function getFrontendUrl() {
+  return (process.env.FRONTEND_URL || 'https://xittoken.co').replace(/\/$/, '');
+}
 
 function generateReferralCode(userId) {
   const base = userId.toString(16).toUpperCase();
@@ -189,6 +199,98 @@ export async function login(req, res) {
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Server error during login' });
+  }
+}
+
+export async function forgotPassword(req, res) {
+  try {
+    const email = (req.body?.email || '').trim().toLowerCase();
+    const genericMessage = 'If this email is registered, you will receive a password reset link shortly.';
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const [users] = await pool.query('SELECT id, username, email FROM users WHERE email = ?', [email]);
+
+    if (users.length === 0) {
+      return res.json({ success: true, message: genericMessage });
+    }
+
+    const user = users[0];
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashResetToken(rawToken);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+    await pool.query('UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = ? AND used_at IS NULL', [user.id]);
+    await pool.query(
+      'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)',
+      [user.id, tokenHash, expiresAt]
+    );
+
+    const resetUrl = `${getFrontendUrl()}/reset-password?token=${rawToken}`;
+
+    try {
+      await sendPasswordResetEmail({
+        toEmail: user.email,
+        username: user.username,
+        resetUrl,
+      });
+    } catch (mailErr) {
+      console.error('Forgot password email error:', mailErr.message);
+      return res.status(503).json({ error: 'Unable to send reset email. Please try again later or contact support@xittoken.co' });
+    }
+
+    res.json({ success: true, message: genericMessage });
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+}
+
+export async function resetPassword(req, res) {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: 'Token and new password are required' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const tokenHash = hashResetToken(String(token).trim());
+
+    const [rows] = await pool.query(
+      `SELECT prt.id, prt.user_id, prt.expires_at, prt.used_at
+       FROM password_reset_tokens prt
+       WHERE prt.token_hash = ?
+       ORDER BY prt.created_at DESC
+       LIMIT 1`,
+      [tokenHash]
+    );
+
+    if (rows.length === 0) {
+      return res.status(400).json({ error: 'Invalid or expired reset link' });
+    }
+
+    const record = rows[0];
+    if (record.used_at) {
+      return res.status(400).json({ error: 'This reset link has already been used' });
+    }
+    if (new Date(record.expires_at) < new Date()) {
+      return res.status(400).json({ error: 'Reset link has expired. Request a new one.' });
+    }
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await pool.query('UPDATE users SET password = ? WHERE id = ?', [hashed, record.user_id]);
+    await pool.query('UPDATE password_reset_tokens SET used_at = NOW() WHERE id = ?', [record.id]);
+    await pool.query('UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = ? AND used_at IS NULL', [record.user_id]);
+
+    res.json({ success: true, message: 'Password updated successfully. You can now login.' });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 }
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # XIT Token — cPanel daily ROI cron
 # Paste this as Command:
-#   /bin/bash /home/virajnandani/xit.back.virajnandanigold.com/scripts/cpanel-cron.sh
+#   /bin/bash /home/USER/back.xittoken.co/scripts/cpanel-cron.sh
 
 set -u
 
@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="$APP_DIR/logs"
 LOG_FILE="$LOG_DIR/cron.log"
-API_URL="https://xit.back.virajnandanigold.com/api/cron/daily-payout"
+API_URL="https://back.xittoken.co/api/cron/daily-payout"
 
 mkdir -p "$LOG_DIR"
 log() {

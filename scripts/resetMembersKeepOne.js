@@ -104,7 +104,7 @@ async function resetMembersKeepOne() {
     console.log(`Payout runs:         cleared`);
     console.log('');
     console.log('Use this referral link for new test signups:');
-    console.log(`  https://xit.virajnandanigold.com/?ref=${keeperRow[0].referral_code}`);
+    console.log(`  https://xittoken.co/?ref=${keeperRow[0].referral_code}`);
     console.log(`  (local: http://localhost:5173/?ref=${keeperRow[0].referral_code})`);
   } catch (err) {
     await connection.rollback();
