@@ -1,6 +1,11 @@
 import { pool } from '../db.js';
 import { getSetting, distributeLevelBonus, distributeRewardBonus } from '../services/incomeService.js';
-import { getBlockchainConfig, isBlockchainMode, sendTokenPayout } from '../services/blockchainService.js';
+import {
+  getBlockchainConfig,
+  isBlockchainMode,
+  verifySellTokenTransfer,
+  sendPaymentPayout,
+} from '../services/blockchainService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
 
 const PLAN_CONFIG = {
@@ -140,7 +145,7 @@ export async function listInvestments(req, res) {
 export async function sellTokens(req, res) {
   const conn = await pool.getConnection();
   try {
-    const { tokenAmount } = req.body;
+    const { tokenAmount, txHash } = req.body;
 
     if (!tokenAmount || tokenAmount <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
@@ -191,6 +196,31 @@ export async function sellTokens(req, res) {
       return res.status(400).json({ error: 'Link your MetaMask wallet before selling in blockchain mode' });
     }
 
+    let payoutTxHash = null;
+    let tokenReturnTxHash = null;
+    let payoutChainId = null;
+    let onChainStatus = 'demo';
+
+    if (chainMode) {
+      if (!txHash) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'Send XIT to admin wallet first, then submit transaction hash' });
+      }
+
+      try {
+        const verified = await verifySellTokenTransfer(conn, txHash, tokenAmount, user.wallet_address);
+        tokenReturnTxHash = txHash;
+        payoutChainId = verified.chainId;
+
+        const paymentPayout = await sendPaymentPayout(conn, user.wallet_address, usdtPayout);
+        payoutTxHash = paymentPayout.txHash;
+        onChainStatus = 'confirmed';
+      } catch (chainErr) {
+        await conn.rollback();
+        return res.status(400).json({ error: chainErr.message || 'On-chain sell failed' });
+      }
+    }
+
     if (amountFromXitBalance > 0) {
       await conn.query('UPDATE users SET xit_balance = xit_balance - ? WHERE id = ?', [amountFromXitBalance, req.userId]);
     }
@@ -224,21 +254,7 @@ export async function sellTokens(req, res) {
       );
     }
 
-    let payoutTxHash = null;
-    let payoutChainId = null;
-    let onChainStatus = 'demo';
-
-    if (chainMode) {
-      try {
-        const payout = await sendTokenPayout(conn, user.wallet_address, netXit);
-        payoutTxHash = payout.txHash;
-        payoutChainId = payout.chainId;
-        onChainStatus = 'confirmed';
-      } catch (payoutErr) {
-        await conn.rollback();
-        return res.status(400).json({ error: `On-chain payout failed: ${payoutErr.message}` });
-      }
-    } else {
+    if (!chainMode) {
       await conn.query(
         'UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?',
         [usdtPayout, req.userId]
@@ -252,9 +268,9 @@ export async function sellTokens(req, res) {
         'sell',
         usdtPayout,
         chainMode
-          ? `Sold ${tokenAmount} XIT (net ${netXit} XIT, admin charge ${adminCharge} XIT)`
+          ? `Sold ${tokenAmount} XIT → ${usdtPayout.toFixed(8)} ${config.paymentTokenSymbol} (admin charge ${adminCharge} XIT). XIT return: ${tokenReturnTxHash}`
           : `Sold ${tokenAmount} XIT → ${usdtPayout.toFixed(2)} USDT (admin charge: ${adminCharge} XIT)`,
-        payoutTxHash,
+        chainMode ? tokenReturnTxHash : payoutTxHash,
         payoutChainId,
         onChainStatus,
       ]
@@ -267,10 +283,13 @@ export async function sellTokens(req, res) {
       sold: tokenAmount,
       adminCharge,
       net: netXit,
-      usdtReceived: chainMode ? null : usdtPayout,
+      usdtReceived: usdtPayout,
+      paymentSymbol: chainMode ? config.paymentTokenSymbol : 'USDT',
       txHash: payoutTxHash,
+      tokenReturnTxHash,
       mode: chainMode ? config.platformMode : 'demo',
       explorerUrl: payoutTxHash ? `${config.blockExplorerUrl}/tx/${payoutTxHash}` : null,
+      tokenReturnExplorerUrl: tokenReturnTxHash ? `${config.blockExplorerUrl}/tx/${tokenReturnTxHash}` : null,
     });
   } catch (err) {
     await conn.rollback();

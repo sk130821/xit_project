@@ -84,6 +84,15 @@ export async function verifyAndBuy(req, res) {
     const paymentAmount = tokenAmount * config.tokenPrice;
     const { chainId } = await verifyBuyTransaction(conn, txHash, paymentAmount, user.wallet_address);
 
+    let tokenPayoutTxHash = null;
+    try {
+      const tokenPayout = await sendTokenPayout(conn, user.wallet_address, tokenAmount);
+      tokenPayoutTxHash = tokenPayout.txHash;
+    } catch (payoutErr) {
+      await conn.rollback();
+      return res.status(400).json({ error: `XIT delivery failed: ${payoutErr.message}` });
+    }
+
     await conn.query(
       'UPDATE users SET total_purchased = total_purchased + ?, is_active = 1 WHERE id = ?',
       [tokenAmount, req.userId]
@@ -100,7 +109,7 @@ export async function verifyAndBuy(req, res) {
         req.userId,
         'buy',
         tokenAmount,
-        `Buy & Invest — ${planType} plan (${config.paymentTokenSymbol})`,
+        `Buy & Invest — ${planType} plan (${config.paymentTokenSymbol}). XIT payout: ${tokenPayoutTxHash}`,
         txHash,
         chainId,
         investment.investmentId,
@@ -117,8 +126,10 @@ export async function verifyAndBuy(req, res) {
       tokens: tokenAmount,
       referralBonus,
       txHash,
+      tokenPayoutTxHash,
       investment,
       accountActivated: wasInactive,
+      explorerUrl: config.blockExplorerUrl ? `${config.blockExplorerUrl}/tx/${tokenPayoutTxHash}` : null,
     });
   } catch (err) {
     await conn.rollback();
