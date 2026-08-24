@@ -228,10 +228,17 @@ export async function getTreasuryTokenBalance(conn) {
   const config = await getBlockchainConfig(conn);
   if (!config.bep20ContractAddress || !config.adminPayoutWallet) return null;
 
+  return getWalletTokenBalance(conn, config.adminPayoutWallet);
+}
+
+export async function getWalletTokenBalance(conn, walletAddress) {
+  const config = await getBlockchainConfig(conn);
+  if (!config.bep20ContractAddress || !walletAddress) return null;
+
   try {
     const provider = getProvider(config.rpcUrl);
     const contract = new ethers.Contract(config.bep20ContractAddress, ERC20_ABI, provider);
-    const balance = await contract.balanceOf(config.adminPayoutWallet);
+    const balance = await contract.balanceOf(walletAddress);
     return ethers.formatUnits(balance, config.tokenDecimals);
   } catch {
     return null;

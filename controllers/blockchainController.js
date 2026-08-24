@@ -2,6 +2,7 @@ import { pool } from '../db.js';
 import { getBlockchainConfig, isBlockchainMode, verifyBuyTransaction, sendTokenPayout, getTreasuryTokenBalance } from '../services/blockchainService.js';
 import { getSetting, distributeReferralBonus } from '../services/incomeService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
+import { getUserOnChainXitBalance, computeBlockchainSellable } from '../services/tokenPayoutService.js';
 
 export async function getConfig(req, res) {
   try {
@@ -36,6 +37,64 @@ export async function linkWallet(req, res) {
     res.json({ success: true, wallet_address: walletAddress });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
+  }
+}
+
+export async function getMemberWalletBalance(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    const [users] = await conn.query('SELECT wallet_address FROM users WHERE id = ?', [req.userId]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const config = await getBlockchainConfig(conn);
+    const chainMode = isBlockchainMode(config.platformMode);
+
+    if (!chainMode) {
+      return res.json({ chainMode: false, onChainXitBalance: null });
+    }
+
+    const walletAddress = users[0].wallet_address;
+    if (!walletAddress) {
+      return res.json({
+        chainMode: true,
+        onChainXitBalance: 0,
+        planSellable: 0,
+        planLocked: 0,
+        totalSellable: 0,
+        incomeBalance: 0,
+      });
+    }
+
+    const [invStats] = await conn.query(
+      `SELECT
+        COALESCE(SUM(sellable_amount), 0) AS plan_sellable,
+        COALESCE(SUM(locked_amount), 0) AS plan_locked
+       FROM investments WHERE user_id = ? AND status = 'active'`,
+      [req.userId]
+    );
+
+    const planSellable = Number(invStats[0].plan_sellable);
+    const planLocked = Number(invStats[0].plan_locked);
+    const onChainXitBalance = await getUserOnChainXitBalance(conn, walletAddress);
+    const incomeBalance = Math.max(0, onChainXitBalance - planSellable - planLocked);
+    const totalSellable = computeBlockchainSellable(onChainXitBalance, planSellable, planLocked);
+
+    res.json({
+      chainMode: true,
+      walletAddress,
+      onChainXitBalance,
+      planSellable,
+      planLocked,
+      incomeBalance,
+      totalSellable,
+    });
+  } catch (err) {
+    console.error('Wallet balance error:', err);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    conn.release();
   }
 }
 

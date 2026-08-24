@@ -4,6 +4,8 @@ import {
   distributeRewardBonus,
   previewRewardBonus,
 } from './incomeService.js';
+import { creditUserXit } from './tokenPayoutService.js';
+import { getBlockchainConfig, isBlockchainMode } from './blockchainService.js';
 
 export function calculateInvestmentRoi(inv, asOfDate = null) {
   const today = asOfDate || new Date().toISOString().split('T')[0];
@@ -133,10 +135,10 @@ async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout',
   const payoutDate = asOfDate || null;
   const createdAt = txCreatedAt(payoutDate);
 
-  await conn.query(
-    'UPDATE users SET xit_balance = xit_balance + ?, total_earned = total_earned + ? WHERE id = ?',
-    [totalClaimable, totalClaimable, inv.user_id]
-  );
+  const config = await getBlockchainConfig(conn);
+  const chainMode = isBlockchainMode(config.platformMode);
+
+  const payout = await creditUserXit(conn, inv.user_id, totalClaimable);
 
   const newRoiReceived = Number(inv.roi_received) + totalClaimable;
   const newStatus = newRoiReceived >= Number(inv.total_return) ? 'completed' : 'active';
@@ -147,15 +149,19 @@ async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout',
     [newRoiReceived, lastRoiDate, newStatus, inv.id]
   );
 
+  const roiDescription = chainMode
+    ? `Daily ROI payout (on-chain${payout.txHash ? `: ${payout.txHash}` : ''})`
+    : description;
+
   if (createdAt) {
     await conn.query(
-      'INSERT INTO transactions (user_id, type, amount, description, investment_id, on_chain_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [inv.user_id, 'roi', totalClaimable, description, inv.id, 'demo', createdAt]
+      'INSERT INTO transactions (user_id, type, amount, description, investment_id, tx_hash, chain_id, on_chain_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [inv.user_id, 'roi', totalClaimable, roiDescription, inv.id, payout.txHash, payout.chainId, payout.onChainStatus, createdAt]
     );
   } else {
     await conn.query(
-      'INSERT INTO transactions (user_id, type, amount, description, investment_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?)',
-      [inv.user_id, 'roi', totalClaimable, description, inv.id, 'demo']
+      'INSERT INTO transactions (user_id, type, amount, description, investment_id, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [inv.user_id, 'roi', totalClaimable, roiDescription, inv.id, payout.txHash, payout.chainId, payout.onChainStatus]
     );
   }
 
@@ -190,11 +196,15 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
         ? 'Auto daily ROI (12 AM IST)'
         : 'Manual ROI payout by admin';
 
+    const config = await getBlockchainConfig(conn);
+    const chainMode = isBlockchainMode(config.platformMode);
+    const effectiveDescription = chainMode ? 'Daily ROI payout (on-chain)' : description;
+
     for (const inv of investments) {
       await conn.beginTransaction();
       try {
         const [locked] = await conn.query('SELECT * FROM investments WHERE id = ? FOR UPDATE', [inv.id]);
-        const result = await processInvestmentRoi(conn, locked[0], description, asOfDate);
+        const result = await processInvestmentRoi(conn, locked[0], effectiveDescription, asOfDate);
         await conn.commit();
 
         if (result && result.roi > 0) {

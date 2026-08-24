@@ -7,6 +7,7 @@ import {
   sendPaymentPayout,
 } from '../services/blockchainService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
+import { creditUserXit, computeBlockchainSellable, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
 
 const PLAN_CONFIG = {
   lock: { profitMultiplier: 3, dailyRoi: 0.82, sellablePercent: 0, lockedPercent: 100 },
@@ -80,10 +81,7 @@ export async function claimRoi(req, res) {
       return res.json({ success: true, completed: true, roi: 0 });
     }
 
-    await conn.query(
-      'UPDATE users SET xit_balance = xit_balance + ?, total_earned = total_earned + ? WHERE id = ?',
-      [totalClaimable, totalClaimable, req.userId]
-    );
+    const payout = await creditUserXit(conn, req.userId, totalClaimable);
 
     const newRoiReceived = Number(inv.roi_received) + totalClaimable;
     const newStatus = newRoiReceived >= Number(inv.total_return) ? 'completed' : 'active';
@@ -94,8 +92,8 @@ export async function claimRoi(req, res) {
     );
 
     await conn.query(
-      'INSERT INTO transactions (user_id, type, amount, description, investment_id) VALUES (?, ?, ?, ?, ?)',
-      [req.userId, 'roi', totalClaimable, 'Daily ROI income', investmentId]
+      'INSERT INTO transactions (user_id, type, amount, description, investment_id, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [req.userId, 'roi', totalClaimable, 'Daily ROI income', investmentId, payout.txHash, payout.chainId, payout.onChainStatus]
     );
 
     const levelBonusTotal = await distributeLevelBonus(conn, req.userId, totalClaimable, investmentId);
@@ -166,20 +164,56 @@ export async function sellTokens(req, res) {
     }
 
     const xitBalance = Number(user.xit_balance || 0);
-    const [invRows] = await conn.query(
-      'SELECT COALESCE(SUM(sellable_amount), 0) as total FROM investments WHERE user_id = ? AND status = ? AND sellable_amount > 0',
-      [req.userId, 'active']
+    const [invStats] = await conn.query(
+      `SELECT
+        COALESCE(SUM(sellable_amount), 0) AS plan_sellable,
+        COALESCE(SUM(locked_amount), 0) AS plan_locked
+       FROM investments WHERE user_id = ? AND status = 'active'`,
+      [req.userId]
     );
-    const sellableFromInvestments = Number(invRows[0].total);
-    const totalSellable = xitBalance + sellableFromInvestments;
+    const sellableFromInvestments = Number(invStats[0].plan_sellable);
+    const planLocked = Number(invStats[0].plan_locked);
 
-    if (tokenAmount > totalSellable) {
-      await conn.rollback();
-      return res.status(400).json({ error: 'Insufficient sellable XIT tokens' });
+    const config = await getBlockchainConfig(conn);
+    const chainMode = isBlockchainMode(config.platformMode);
+
+    let totalSellable;
+    let amountFromXitBalance = 0;
+    let amountFromInvestments = 0;
+
+    if (chainMode) {
+      if (!user.wallet_address) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'Link your MetaMask wallet before selling in blockchain mode' });
+      }
+
+      const onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
+      totalSellable = computeBlockchainSellable(onChainBalance, sellableFromInvestments, planLocked);
+
+      if (tokenAmount > totalSellable) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'Insufficient sellable XIT tokens (plan hold or wallet balance)' });
+      }
+
+      if (tokenAmount > onChainBalance) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'Insufficient XIT balance in your wallet' });
+      }
+
+      const incomeSellable = Math.max(0, onChainBalance - sellableFromInvestments - planLocked);
+      amountFromXitBalance = Math.min(tokenAmount, incomeSellable);
+      amountFromInvestments = tokenAmount - amountFromXitBalance;
+    } else {
+      totalSellable = xitBalance + sellableFromInvestments;
+
+      if (tokenAmount > totalSellable) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'Insufficient sellable XIT tokens' });
+      }
+
+      amountFromXitBalance = Math.min(tokenAmount, xitBalance);
+      amountFromInvestments = tokenAmount - amountFromXitBalance;
     }
-
-    const amountFromXitBalance = Math.min(tokenAmount, xitBalance);
-    const amountFromInvestments = tokenAmount - amountFromXitBalance;
 
     const adminRateStr = await getSetting(conn, 'admin_charge_percent', '10');
     const adminRate = parseFloat(adminRateStr);
@@ -187,14 +221,6 @@ export async function sellTokens(req, res) {
     const netXit = tokenAmount - adminCharge;
     const tokenPrice = parseFloat(await getSetting(conn, 'token_price', '1'));
     const usdtPayout = netXit * tokenPrice;
-
-    const config = await getBlockchainConfig(conn);
-    const chainMode = isBlockchainMode(config.platformMode);
-
-    if (chainMode && !user.wallet_address) {
-      await conn.rollback();
-      return res.status(400).json({ error: 'Link your MetaMask wallet before selling in blockchain mode' });
-    }
 
     let payoutTxHash = null;
     let tokenReturnTxHash = null;
@@ -221,7 +247,7 @@ export async function sellTokens(req, res) {
       }
     }
 
-    if (amountFromXitBalance > 0) {
+    if (!chainMode && amountFromXitBalance > 0) {
       await conn.query('UPDATE users SET xit_balance = xit_balance - ? WHERE id = ?', [amountFromXitBalance, req.userId]);
     }
 

@@ -1,7 +1,29 @@
+import { creditUserXit } from './tokenPayoutService.js';
+
 export async function getSetting(conn, key, fallback) {
   const [rows] = await conn.query('SELECT setting_value FROM settings WHERE setting_key = ?', [key]);
   if (rows.length === 0) return fallback;
   return rows[0].setting_value;
+}
+
+async function insertIncomeTransaction(conn, {
+  userId, type, amount, description, relatedUserId = null, investmentId = null, payout = null, createdAt = null,
+}) {
+  const txHash = payout?.txHash || null;
+  const chainId = payout?.chainId || null;
+  const onChainStatus = payout?.onChainStatus || 'demo';
+
+  if (createdAt) {
+    await conn.query(
+      'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id, tx_hash, chain_id, on_chain_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [userId, type, amount, description, relatedUserId, investmentId, txHash, chainId, onChainStatus, createdAt]
+    );
+  } else {
+    await conn.query(
+      'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [userId, type, amount, description, relatedUserId, investmentId, txHash, chainId, onChainStatus]
+    );
+  }
 }
 
 export async function distributeReferralBonus(conn, buyerId, tokenAmount) {
@@ -18,15 +40,16 @@ export async function distributeReferralBonus(conn, buyerId, tokenAmount) {
 
   const bonus = (tokenAmount * bonusPercent) / 100;
 
-  await conn.query(
-    'UPDATE users SET xit_balance = xit_balance + ?, total_earned = total_earned + ? WHERE id = ?',
-    [bonus, bonus, sponsorId]
-  );
+  const payout = await creditUserXit(conn, sponsorId, bonus);
 
-  await conn.query(
-    'INSERT INTO transactions (user_id, type, amount, description, related_user_id) VALUES (?, ?, ?, ?, ?)',
-    [sponsorId, 'referral_bonus', bonus, `Direct referral bonus (${bonusPercent}%)`, buyerId]
-  );
+  await insertIncomeTransaction(conn, {
+    userId: sponsorId,
+    type: 'referral_bonus',
+    amount: bonus,
+    description: `Direct referral bonus (${bonusPercent}%)`,
+    relatedUserId: buyerId,
+    payout,
+  });
 
   return bonus;
 }
@@ -53,19 +76,18 @@ export async function distributeLevelBonus(conn, earnerId, roiAmount, investment
 
     totalBonus += bonus;
 
-    await conn.query(
-      'UPDATE users SET xit_balance = xit_balance + ?, total_earned = total_earned + ? WHERE id = ?',
-      [bonus, bonus, upline.upline_id]
-    );
+    const payout = await creditUserXit(conn, upline.upline_id, bonus);
 
-    await conn.query(
-      createdAt
-        ? 'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        : 'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id) VALUES (?, ?, ?, ?, ?, ?)',
-      createdAt
-        ? [upline.upline_id, 'level_bonus', bonus, `Level ${upline.level} ROI bonus`, earnerId, investmentId, createdAt]
-        : [upline.upline_id, 'level_bonus', bonus, `Level ${upline.level} ROI bonus`, earnerId, investmentId]
-    );
+    await insertIncomeTransaction(conn, {
+      userId: upline.upline_id,
+      type: 'level_bonus',
+      amount: bonus,
+      description: `Level ${upline.level} ROI bonus`,
+      relatedUserId: earnerId,
+      investmentId,
+      payout,
+      createdAt,
+    });
   }
 
   return totalBonus;
@@ -209,34 +231,18 @@ export async function distributeRewardBonus(conn, earnerId, roiAmount, investmen
             earnerName = earnerRow[0]?.username || 'member';
           }
 
-          await conn.query(
-            'UPDATE users SET xit_balance = xit_balance + ?, total_earned = total_earned + ? WHERE id = ?',
-            [bonus, bonus, sponsorId]
-          );
+          const payout = await creditUserXit(conn, sponsorId, bonus);
 
-          await conn.query(
-            createdAt
-              ? 'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-              : 'INSERT INTO transactions (user_id, type, amount, description, related_user_id, investment_id) VALUES (?, ?, ?, ?, ?, ?)',
-            createdAt
-              ? [
-                  sponsorId,
-                  'reward_bonus',
-                  bonus,
-                  `Reward bonus (${currentTier.tier_name}, ${percentage}% of ${earnerName} ROI)`,
-                  earnerId,
-                  investmentId,
-                  createdAt,
-                ]
-              : [
-                  sponsorId,
-                  'reward_bonus',
-                  bonus,
-                  `Reward bonus (${currentTier.tier_name}, ${percentage}% of ${earnerName} ROI)`,
-                  earnerId,
-                  investmentId,
-                ]
-          );
+          await insertIncomeTransaction(conn, {
+            userId: sponsorId,
+            type: 'reward_bonus',
+            amount: bonus,
+            description: `Reward bonus (${currentTier.tier_name}, ${percentage}% of ${earnerName} ROI)`,
+            relatedUserId: earnerId,
+            investmentId,
+            payout,
+            createdAt,
+          });
 
           totalPaid += bonus;
         }

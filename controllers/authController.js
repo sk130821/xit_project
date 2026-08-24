@@ -3,7 +3,8 @@ import crypto from 'crypto';
 import { pool } from '../db.js';
 import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
-import { getBlockchainConfig } from '../services/blockchainService.js';
+import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
+import { getUserOnChainXitBalance, computeBlockchainSellable } from '../services/tokenPayoutService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
 
 function hashResetToken(token) {
@@ -337,6 +338,29 @@ export async function getMe(req, res) {
       [req.userId]
     );
 
+    const planSellable = Number(invStats[0].plan_sellable);
+    const planLocked = Number(invStats[0].plan_locked);
+
+    const conn = await pool.getConnection();
+    let platformMode = 'demo';
+    let onChainXitBalance = null;
+    let totalSellable = null;
+
+    try {
+      const config = await getBlockchainConfig(conn);
+      platformMode = config.platformMode;
+      const chainMode = isBlockchainMode(platformMode);
+
+      if (chainMode && user.wallet_address) {
+        onChainXitBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
+        totalSellable = computeBlockchainSellable(onChainXitBalance, planSellable, planLocked);
+      } else if (!chainMode) {
+        totalSellable = Number(user.xit_balance || 0) + planSellable;
+      }
+    } finally {
+      conn.release();
+    }
+
     res.json({
       id: user.id,
       username: user.username,
@@ -350,8 +374,11 @@ export async function getMe(req, res) {
       total_earned: Number(user.total_earned),
       total_invested: Number(user.total_invested),
       total_purchased: Number(user.total_purchased || 0),
-      plan_sellable: Number(invStats[0].plan_sellable),
-      plan_locked: Number(invStats[0].plan_locked),
+      plan_sellable: planSellable,
+      plan_locked: planLocked,
+      platform_mode: platformMode,
+      on_chain_xit_balance: onChainXitBalance,
+      total_sellable: totalSellable,
       is_active: !!user.is_active,
       created_at: user.created_at,
     });
