@@ -6,6 +6,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "init-db": "node initDb.js && node scripts/seedAdmin.js",
+    "cron": "node scripts/cpanelCron.js",
     "reset-members": "node scripts/resetMembersKeepOne.js"
   },
   "dependencies": {
