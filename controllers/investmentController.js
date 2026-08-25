@@ -8,6 +8,7 @@ import {
 } from '../services/blockchainService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
 import { creditUserXit, computeBlockchainSellable, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
+import { getISTDateString } from '../utils/istDate.js';
 
 const PLAN_CONFIG = {
   lock: { profitMultiplier: 3, dailyRoi: 0.82, sellablePercent: 0, lockedPercent: 100 },
@@ -58,7 +59,7 @@ export async function claimRoi(req, res) {
       return res.status(400).json({ error: 'Investment is not active' });
     }
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = getISTDateString();
     const lastRoi = new Date(inv.last_roi_date).toISOString().split('T')[0];
 
     if (lastRoi >= today) {

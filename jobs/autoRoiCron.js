@@ -20,10 +20,16 @@ function msUntilMidnightIST() {
 
 export async function runAutoRoiJob() {
   const result = await runPayout({ runType: 'auto', triggeredBy: 'system' });
+  if (result.skipped) {
+    console.log(`[Auto ROI] Skipped — already ran for IST date ${result.runDate}`);
+    return result;
+  }
   if (result.investmentsProcessed > 0) {
     console.log(
       `[Auto ROI] ${result.investmentsProcessed} investments · ROI ${result.totalRoi.toFixed(2)} · Level ${result.totalLevelBonus.toFixed(2)} · Reward ${result.totalRewardBonus.toFixed(2)} XIT`
     );
+  } else {
+    console.log(`[Auto ROI] No eligible investments for ${result.payoutDate}`);
   }
   return result;
 }

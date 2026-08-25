@@ -22,9 +22,14 @@ export async function runDailyPayoutCron(req, res) {
 
   try {
     const result = await runAutoRoiJob();
+    const message = result.skipped
+      ? 'Daily payout already completed for today (IST)'
+      : 'Daily payout cron completed';
     return res.json({
       ok: true,
-      message: 'Daily payout cron completed',
+      skipped: !!result.skipped,
+      message,
+      istDate: result.runDate || result.payoutDate,
       ...result,
     });
   } catch (err) {

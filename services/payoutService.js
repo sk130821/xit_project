@@ -6,9 +6,10 @@ import {
 } from './incomeService.js';
 import { creditUserXit } from './tokenPayoutService.js';
 import { getBlockchainConfig, isBlockchainMode } from './blockchainService.js';
+import { getISTDateString } from '../utils/istDate.js';
 
 export function calculateInvestmentRoi(inv, asOfDate = null) {
-  const today = asOfDate || new Date().toISOString().split('T')[0];
+  const today = asOfDate || getISTDateString();
   const lastRoi = new Date(inv.last_roi_date).toISOString().split('T')[0];
 
   if (lastRoi >= today) return null;
@@ -102,7 +103,7 @@ export async function previewPayout(asOfDate = null) {
 
     items.sort((a, b) => b.roiAmount - a.roiAmount);
 
-    const effectiveDate = asOfDate || new Date().toISOString().split('T')[0];
+    const effectiveDate = asOfDate || getISTDateString();
 
     return {
       eligibleInvestments: eligibleCount,
@@ -142,7 +143,7 @@ async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout',
 
   const newRoiReceived = Number(inv.roi_received) + totalClaimable;
   const newStatus = newRoiReceived >= Number(inv.total_return) ? 'completed' : 'active';
-  const lastRoiDate = payoutDate || new Date().toISOString().split('T')[0];
+  const lastRoiDate = payoutDate || getISTDateString();
 
   await conn.query(
     'UPDATE investments SET roi_received = ?, last_roi_date = ?, status = ? WHERE id = ?',
@@ -185,7 +186,29 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
   let totalLevelBonus = 0;
   let totalRewardBonus = 0;
 
+  const runDate = asOfDate || getISTDateString();
+  const isAutoDaily = runType === 'auto' && !asOfDate;
+
   try {
+    if (isAutoDaily) {
+      const [existing] = await conn.query(
+        `SELECT id, investments_processed, total_payout, created_at
+         FROM payout_runs WHERE run_date = ? AND run_type = 'auto' LIMIT 1`,
+        [runDate]
+      );
+      if (existing.length > 0) {
+        return {
+          skipped: true,
+          reason: 'Daily payout already completed for this IST date',
+          runId: existing[0].id,
+          runDate,
+          investmentsProcessed: Number(existing[0].investments_processed),
+          totalPayout: Number(existing[0].total_payout),
+          alreadyRanAt: existing[0].created_at,
+        };
+      }
+    }
+
     const [investments] = await conn.query(
       "SELECT * FROM investments WHERE status = 'active'"
     );
@@ -220,18 +243,30 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
     }
 
     const totalPayout = totalRoi + totalLevelBonus + totalRewardBonus;
-    const runDate = asOfDate || new Date().toISOString().split('T')[0];
-    const effectiveRunType = asOfDate ? 'demo' : runType;
+    const effectiveRunType = asOfDate ? 'manual' : runType;
 
-    const [runResult] = await pool.query(
-      `INSERT INTO payout_runs
-        (run_type, run_date, investments_processed, total_roi, total_level_bonus, total_reward_bonus, total_payout, triggered_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [effectiveRunType, runDate, investmentsProcessed, totalRoi, totalLevelBonus, totalRewardBonus, totalPayout, triggeredBy]
-    );
+    let runId = null;
+    if (investmentsProcessed > 0 || totalPayout > 0 || !isAutoDaily) {
+      const [runResult] = await pool.query(
+        `INSERT INTO payout_runs
+          (run_type, run_date, investments_processed, total_roi, total_level_bonus, total_reward_bonus, total_payout, triggered_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [effectiveRunType, runDate, investmentsProcessed, totalRoi, totalLevelBonus, totalRewardBonus, totalPayout, triggeredBy]
+      );
+      runId = runResult.insertId;
+    } else if (isAutoDaily) {
+      const [runResult] = await pool.query(
+        `INSERT INTO payout_runs
+          (run_type, run_date, investments_processed, total_roi, total_level_bonus, total_reward_bonus, total_payout, triggered_by)
+         VALUES (?, ?, 0, 0, 0, 0, 0, ?)`,
+        ['auto', runDate, triggeredBy]
+      );
+      runId = runResult.insertId;
+    }
 
     return {
-      runId: runResult.insertId,
+      skipped: false,
+      runId,
       investmentsProcessed,
       totalRoi,
       totalLevelBonus,
