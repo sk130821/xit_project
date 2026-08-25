@@ -9,13 +9,38 @@ export function calcTotalReturn(tokenAmount, plan) {
   return tokenAmount * (1 + plan.profitMultiplier);
 }
 
+export async function getFlexibleMinTokens(conn) {
+  return parseFloat(await getSetting(conn, 'flexible_min_tokens', '100'));
+}
+
+export function resolvePlanForPurchase(tokenAmount, planType, flexibleMin) {
+  if (tokenAmount < flexibleMin) return 'lock';
+  if (planType === 'flexible') return 'flexible';
+  return planType === 'lock' ? 'lock' : 'lock';
+}
+
+export function isIncomeEligible(tokenAmount, flexibleMin) {
+  return tokenAmount >= flexibleMin;
+}
+
+export function investmentHasIncomeEligible(inv, flexibleMin = 100) {
+  if (inv.income_eligible != null) return Boolean(inv.income_eligible);
+  return Number(inv.token_amount) >= flexibleMin;
+}
+
 export async function createInvestmentForUser(conn, userId, tokenAmount, planType, options = {}) {
   const { skipWalletDeduction = false, skipTransaction = false } = options;
-  const minInvestment = parseFloat(await getSetting(conn, 'min_investment', '100'));
-  if (!tokenAmount || tokenAmount < minInvestment) {
-    throw new Error(`Minimum investment is ${minInvestment} tokens`);
+  const minPurchase = parseFloat(await getSetting(conn, 'min_purchase', '1'));
+  const flexibleMin = await getFlexibleMinTokens(conn);
+
+  if (!tokenAmount || tokenAmount < minPurchase) {
+    throw new Error(`Minimum purchase is ${minPurchase} tokens`);
   }
-  if (!PLAN_CONFIG[planType]) {
+
+  const resolvedPlan = resolvePlanForPurchase(tokenAmount, planType, flexibleMin);
+  const incomeEligible = isIncomeEligible(tokenAmount, flexibleMin) ? 1 : 0;
+
+  if (!PLAN_CONFIG[resolvedPlan]) {
     throw new Error('Invalid plan type');
   }
 
@@ -27,9 +52,9 @@ export async function createInvestmentForUser(conn, userId, tokenAmount, planTyp
     throw new Error('Insufficient XIT balance');
   }
 
-  const plan = PLAN_CONFIG[planType];
+  const plan = PLAN_CONFIG[resolvedPlan];
   const lockDays = parseInt(
-    planType === 'lock'
+    resolvedPlan === 'lock'
       ? await getSetting(conn, 'lock_period_days', '365')
       : await getSetting(conn, 'flexible_lock_days', '365')
   );
@@ -52,26 +77,28 @@ export async function createInvestmentForUser(conn, userId, tokenAmount, planTyp
   }
 
   const [invResult] = await conn.query(
-    `INSERT INTO investments (user_id, plan_type, token_amount, total_return, daily_roi_rate, sellable_amount, locked_amount, end_date)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [userId, planType, tokenAmount, totalReturn, plan.dailyRoi, sellable, locked, endDate]
+    `INSERT INTO investments (user_id, plan_type, token_amount, total_return, daily_roi_rate, sellable_amount, locked_amount, end_date, income_eligible)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [userId, resolvedPlan, tokenAmount, totalReturn, plan.dailyRoi, sellable, locked, endDate, incomeEligible]
   );
 
   if (!skipTransaction) {
     await conn.query(
       'INSERT INTO transactions (user_id, type, amount, description, investment_id) VALUES (?, ?, ?, ?, ?)',
-      [userId, 'invest', tokenAmount, `${planType} plan investment`, invResult.insertId]
+      [userId, 'invest', tokenAmount, `${resolvedPlan} plan investment`, invResult.insertId]
     );
   }
 
   return {
     investmentId: invResult.insertId,
-    plan: planType,
+    plan: resolvedPlan,
     amount: tokenAmount,
     totalReturn,
     profitMultiplier: plan.profitMultiplier,
     dailyRoi: plan.dailyRoi,
     sellable,
     locked,
+    incomeEligible: incomeEligible === 1,
+    planAutoLocked: resolvedPlan === 'lock' && planType === 'flexible' && tokenAmount < flexibleMin,
   };
 }

@@ -6,7 +6,7 @@ import {
   verifySellTokenTransfer,
   sendPaymentPayout,
 } from '../services/blockchainService.js';
-import { createInvestmentForUser } from '../services/investmentService.js';
+import { createInvestmentForUser, investmentHasIncomeEligible } from '../services/investmentService.js';
 import { creditUserXit, computeBlockchainSellable, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
 import { getISTDateString } from '../utils/istDate.js';
 
@@ -97,8 +97,12 @@ export async function claimRoi(req, res) {
       [req.userId, 'roi', totalClaimable, 'Daily ROI income', investmentId, payout.txHash, payout.chainId, payout.onChainStatus]
     );
 
-    const levelBonusTotal = await distributeLevelBonus(conn, req.userId, totalClaimable, investmentId);
-    const rewardBonus = await distributeRewardBonus(conn, req.userId, totalClaimable, investmentId);
+    const levelBonusTotal = investmentHasIncomeEligible(inv)
+      ? await distributeLevelBonus(conn, req.userId, totalClaimable, investmentId)
+      : 0;
+    const rewardBonus = investmentHasIncomeEligible(inv)
+      ? await distributeRewardBonus(conn, req.userId, totalClaimable, investmentId)
+      : 0;
 
     await conn.commit();
 
@@ -135,6 +139,7 @@ export async function listInvestments(req, res) {
       roi_received: Number(inv.roi_received),
       sellable_amount: Number(inv.sellable_amount),
       locked_amount: Number(inv.locked_amount),
+      income_eligible: investmentHasIncomeEligible(inv),
     })));
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -144,7 +149,7 @@ export async function listInvestments(req, res) {
 export async function sellTokens(req, res) {
   const conn = await pool.getConnection();
   try {
-    const { tokenAmount, txHash } = req.body;
+    const { tokenAmount, txHash, investmentId } = req.body;
 
     if (!tokenAmount || tokenAmount <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
@@ -181,8 +186,47 @@ export async function sellTokens(req, res) {
     let totalSellable;
     let amountFromXitBalance = 0;
     let amountFromInvestments = 0;
+    let targetInvestmentId = investmentId ? Number(investmentId) : null;
 
-    if (chainMode) {
+    if (targetInvestmentId) {
+      const [targetInvs] = await conn.query(
+        'SELECT id, sellable_amount, plan_type, status FROM investments WHERE id = ? AND user_id = ? FOR UPDATE',
+        [targetInvestmentId, req.userId]
+      );
+      if (targetInvs.length === 0) {
+        await conn.rollback();
+        return res.status(404).json({ error: 'Investment not found' });
+      }
+      const targetInv = targetInvs[0];
+      if (targetInv.status !== 'active') {
+        await conn.rollback();
+        return res.status(400).json({ error: 'Investment is not active' });
+      }
+      const invSellable = Number(targetInv.sellable_amount);
+      if (invSellable <= 0) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'This investment has no sellable tokens' });
+      }
+      if (tokenAmount > invSellable) {
+        await conn.rollback();
+        return res.status(400).json({ error: `Maximum sellable from this investment is ${invSellable} XIT` });
+      }
+
+      amountFromInvestments = tokenAmount;
+      totalSellable = invSellable;
+
+      if (chainMode) {
+        if (!user.wallet_address) {
+          await conn.rollback();
+          return res.status(400).json({ error: 'Link your MetaMask wallet before selling in blockchain mode' });
+        }
+        const onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
+        if (tokenAmount > onChainBalance) {
+          await conn.rollback();
+          return res.status(400).json({ error: 'Insufficient XIT balance in your wallet' });
+        }
+      }
+    } else if (chainMode) {
       if (!user.wallet_address) {
         await conn.rollback();
         return res.status(400).json({ error: 'Link your MetaMask wallet before selling in blockchain mode' });
@@ -253,25 +297,32 @@ export async function sellTokens(req, res) {
     }
 
     if (amountFromInvestments > 0) {
-      let remainder = amountFromInvestments;
-
-      while (remainder > 0) {
-        const [invs] = await conn.query(
-          'SELECT id, sellable_amount FROM investments WHERE user_id = ? AND status = ? AND sellable_amount > 0 ORDER BY created_at LIMIT 1 FOR UPDATE',
-          [req.userId, 'active']
+      if (targetInvestmentId) {
+        await conn.query(
+          'UPDATE investments SET sellable_amount = sellable_amount - ? WHERE id = ? AND user_id = ?',
+          [amountFromInvestments, targetInvestmentId, req.userId]
         );
+      } else {
+        let remainder = amountFromInvestments;
 
-        if (invs.length === 0) break;
+        while (remainder > 0) {
+          const [invs] = await conn.query(
+            'SELECT id, sellable_amount FROM investments WHERE user_id = ? AND status = ? AND sellable_amount > 0 ORDER BY created_at LIMIT 1 FOR UPDATE',
+            [req.userId, 'active']
+          );
 
-        const inv = invs[0];
-        const available = Number(inv.sellable_amount);
+          if (invs.length === 0) break;
 
-        if (available >= remainder) {
-          await conn.query('UPDATE investments SET sellable_amount = sellable_amount - ? WHERE id = ?', [remainder, inv.id]);
-          remainder = 0;
-        } else {
-          await conn.query('UPDATE investments SET sellable_amount = 0 WHERE id = ?', [inv.id]);
-          remainder -= available;
+          const inv = invs[0];
+          const available = Number(inv.sellable_amount);
+
+          if (available >= remainder) {
+            await conn.query('UPDATE investments SET sellable_amount = sellable_amount - ? WHERE id = ?', [remainder, inv.id]);
+            remainder = 0;
+          } else {
+            await conn.query('UPDATE investments SET sellable_amount = 0 WHERE id = ?', [inv.id]);
+            remainder -= available;
+          }
         }
       }
 
@@ -308,6 +359,7 @@ export async function sellTokens(req, res) {
     res.json({
       success: true,
       sold: tokenAmount,
+      investmentId: targetInvestmentId,
       adminCharge,
       net: netXit,
       usdtReceived: usdtPayout,

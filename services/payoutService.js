@@ -6,6 +6,7 @@ import {
 } from './incomeService.js';
 import { creditUserXit } from './tokenPayoutService.js';
 import { getBlockchainConfig, isBlockchainMode } from './blockchainService.js';
+import { investmentHasIncomeEligible } from './investmentService.js';
 import { getISTDateString } from '../utils/istDate.js';
 
 export function calculateInvestmentRoi(inv, asOfDate = null) {
@@ -80,8 +81,12 @@ export async function previewPayout(asOfDate = null) {
       if (!calc || calc.roi <= 0) continue;
 
       eligibleCount++;
-      const levelBonus = await previewLevelBonus(conn, inv.user_id, calc.roi);
-      const reward = await previewRewardBonus(conn, inv.user_id, calc.roi);
+      const levelBonus = investmentHasIncomeEligible(inv)
+        ? await previewLevelBonus(conn, inv.user_id, calc.roi)
+        : 0;
+      const reward = investmentHasIncomeEligible(inv)
+        ? await previewRewardBonus(conn, inv.user_id, calc.roi)
+        : { bonus: 0, tierName: null };
 
       totalRoi += calc.roi;
       totalLevelBonus += levelBonus;
@@ -166,8 +171,12 @@ async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout',
     );
   }
 
-  const levelBonus = await distributeLevelBonus(conn, inv.user_id, totalClaimable, inv.id, payoutDate);
-  const rewardBonus = await distributeRewardBonus(conn, inv.user_id, totalClaimable, inv.id, payoutDate);
+  const levelBonus = investmentHasIncomeEligible(inv)
+    ? await distributeLevelBonus(conn, inv.user_id, totalClaimable, inv.id, payoutDate)
+    : 0;
+  const rewardBonus = investmentHasIncomeEligible(inv)
+    ? await distributeRewardBonus(conn, inv.user_id, totalClaimable, inv.id, payoutDate)
+    : 0;
 
   return {
     investmentId: inv.id,

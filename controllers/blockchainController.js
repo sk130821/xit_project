@@ -116,12 +116,10 @@ export async function verifyAndBuy(req, res) {
       return res.status(400).json({ error: 'On-chain purchase only available in testnet/real mode' });
     }
 
-    const minPurchase = parseFloat(await getSetting(conn, 'min_purchase', '10'));
-    const minInvestment = parseFloat(await getSetting(conn, 'min_investment', '100'));
-    const minAmount = Math.max(minPurchase, minInvestment);
+    const minPurchase = parseFloat(await getSetting(conn, 'min_purchase', '1'));
 
-    if (tokenAmount < minAmount) {
-      return res.status(400).json({ error: `Minimum purchase is ${minAmount} tokens` });
+    if (tokenAmount < minPurchase) {
+      return res.status(400).json({ error: `Minimum purchase is ${minPurchase} tokens` });
     }
 
     await conn.beginTransaction();
@@ -176,7 +174,9 @@ export async function verifyAndBuy(req, res) {
       ]
     );
 
-    const referralBonus = await distributeReferralBonus(conn, req.userId, tokenAmount);
+    const referralBonus = investment.incomeEligible
+      ? await distributeReferralBonus(conn, req.userId, tokenAmount)
+      : 0;
 
     await conn.commit();
 

@@ -6,7 +6,11 @@ function secretsMatch(provided, expected) {
   const a = Buffer.from(String(provided));
   const b = Buffer.from(String(expected));
   if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+  try {
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
 }
 
 export async function runDailyPayoutCron(req, res) {
