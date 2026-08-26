@@ -4,7 +4,7 @@ import {
   distributeRewardBonus,
   previewRewardBonus,
 } from './incomeService.js';
-import { creditUserXit } from './tokenPayoutService.js';
+import { creditUserXit, toPositiveInt } from './tokenPayoutService.js';
 import { getBlockchainConfig, isBlockchainMode } from './blockchainService.js';
 import { investmentHasIncomeEligible } from './investmentService.js';
 import { getISTDateString } from '../utils/istDate.js';
@@ -126,40 +126,60 @@ export async function previewPayout(asOfDate = null) {
   }
 }
 
-async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout', asOfDate = null) {
+/**
+ * @param {object} inv - investment row (amounts, rates, dates)
+ * @param {{ userId: number, username: string, walletAddress: string|null }} owner - frozen owner from JOIN (never re-derived)
+ */
+async function processInvestmentRoi(conn, inv, owner, description = 'Daily ROI payout', asOfDate = null) {
   const calc = calculateInvestmentRoi(inv, asOfDate);
   if (!calc) return null;
 
+  const investmentId = toPositiveInt(inv.id, 'investment.id');
+  const ownerUserId = toPositiveInt(owner.userId, 'owner.userId');
+  const ownerUsername = String(owner.username || '');
+  if (!ownerUsername) {
+    throw new Error(`Investment ${investmentId} missing owner username`);
+  }
+
+  // Guard: never credit if days somehow leaked into owner id (historical bug symptom)
+  if (calc.days != null && Number(calc.days) === ownerUserId && ownerUserId < 10) {
+    console.warn(
+      `[Payout] unusual: ownerUserId=${ownerUserId} equals calc.days=${calc.days} for inv=${investmentId}`
+    );
+  }
+
   if (calc.roi <= 0) {
     if (calc.completed) {
-      await conn.query('UPDATE investments SET status = ? WHERE id = ?', ['completed', inv.id]);
+      await conn.query(`UPDATE investments SET status = ? WHERE id = ${investmentId}`, ['completed']);
     }
-    return { investmentId: inv.id, roi: 0, levelBonus: 0, rewardBonus: 0, completed: calc.completed };
+    return { investmentId, roi: 0, levelBonus: 0, rewardBonus: 0, completed: calc.completed };
   }
 
   const totalClaimable = calc.roi;
   const payoutDate = asOfDate || null;
   const createdAt = txCreatedAt(payoutDate);
 
-  // Bind earner once — never use calc.days / amounts as user id
-  const earnerUserId = parseInt(String(inv.user_id), 10);
-  if (!Number.isInteger(earnerUserId) || earnerUserId <= 0) {
-    throw new Error(`Investment ${inv.id} has invalid user_id=${JSON.stringify(inv.user_id)}`);
-  }
-  if (inv.username == null || inv.username === '') {
-    throw new Error(`Investment ${inv.id} missing joined username for user_id=${earnerUserId}`);
-  }
+  console.log(
+    `[Payout] credit inv=${investmentId} owner=${ownerUserId}(${ownerUsername}) ` +
+      `roi=${totalClaimable} days=${calc.days} wallet=${owner.walletAddress ? 'yes' : 'no'}`
+  );
 
   const config = await getBlockchainConfig(conn);
   const chainMode = isBlockchainMode(config.platformMode);
 
-  const payout = await creditUserXit(conn, earnerUserId, totalClaimable, {
-    expectedUsername: inv.username,
+  const payout = await creditUserXit(conn, ownerUserId, totalClaimable, {
+    expectedUsername: ownerUsername,
+    walletAddress: owner.walletAddress,
   });
 
-  if (payout.userId != null && Number(payout.userId) !== earnerUserId) {
+  if (Number(payout.userId) !== ownerUserId) {
     throw new Error(
-      `Safety abort: credited userId=${payout.userId} but investment ${inv.id} belongs to ${earnerUserId}`
+      `Safety abort: credited userId=${payout.userId} but owner is ${ownerUserId} (${ownerUsername})`
+    );
+  }
+  if (payout.username && payout.username !== ownerUsername) {
+    throw new Error(
+      `Safety abort: credited username=${payout.username} but owner is ${ownerUsername}`
     );
   }
 
@@ -168,8 +188,8 @@ async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout',
   const lastRoiDate = payoutDate || getISTDateString();
 
   await conn.query(
-    'UPDATE investments SET roi_received = ?, last_roi_date = ?, status = ? WHERE id = ?',
-    [newRoiReceived, lastRoiDate, newStatus, inv.id]
+    `UPDATE investments SET roi_received = ?, last_roi_date = ?, status = ? WHERE id = ${investmentId} AND user_id = ${ownerUserId}`,
+    [newRoiReceived, lastRoiDate, newStatus]
   );
 
   const roiDescription = chainMode
@@ -179,26 +199,26 @@ async function processInvestmentRoi(conn, inv, description = 'Daily ROI payout',
   if (createdAt) {
     await conn.query(
       'INSERT INTO transactions (user_id, type, amount, description, investment_id, tx_hash, chain_id, on_chain_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [earnerUserId, 'roi', totalClaimable, roiDescription, inv.id, payout.txHash, payout.chainId, payout.onChainStatus, createdAt]
+      [ownerUserId, 'roi', totalClaimable, roiDescription, investmentId, payout.txHash, payout.chainId, payout.onChainStatus, createdAt]
     );
   } else {
     await conn.query(
       'INSERT INTO transactions (user_id, type, amount, description, investment_id, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [earnerUserId, 'roi', totalClaimable, roiDescription, inv.id, payout.txHash, payout.chainId, payout.onChainStatus]
+      [ownerUserId, 'roi', totalClaimable, roiDescription, investmentId, payout.txHash, payout.chainId, payout.onChainStatus]
     );
   }
 
   const levelBonus = investmentHasIncomeEligible(inv)
-    ? await distributeLevelBonus(conn, earnerUserId, totalClaimable, inv.id, payoutDate)
+    ? await distributeLevelBonus(conn, ownerUserId, totalClaimable, investmentId, payoutDate)
     : 0;
   const rewardBonus = investmentHasIncomeEligible(inv)
-    ? await distributeRewardBonus(conn, earnerUserId, totalClaimable, inv.id, payoutDate)
+    ? await distributeRewardBonus(conn, ownerUserId, totalClaimable, investmentId, payoutDate)
     : 0;
 
   return {
-    investmentId: inv.id,
-    userId: earnerUserId,
-    username: inv.username,
+    investmentId,
+    userId: ownerUserId,
+    username: ownerUsername,
     roi: totalClaimable,
     levelBonus,
     rewardBonus,
@@ -246,7 +266,19 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
     }
 
     const [investments] = await conn.query(
-      `SELECT i.*, u.username, u.wallet_address
+      `SELECT
+         i.id AS investment_id,
+         i.user_id AS owner_user_id,
+         i.plan_type,
+         i.token_amount,
+         i.total_return,
+         i.daily_roi_rate,
+         i.roi_received,
+         i.last_roi_date,
+         i.status,
+         i.income_eligible,
+         u.username AS owner_username,
+         u.wallet_address AS owner_wallet
        FROM investments i
        INNER JOIN users u ON u.id = i.user_id
        WHERE i.status = 'active'
@@ -267,56 +299,71 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
       `[Payout] active=${investments.length} mode=${config.platformMode} chainMode=${chainMode}`
     );
 
-    for (const inv of investments) {
+    for (const row of investments) {
+      // Freeze owner identity as plain primitives from JOIN — never re-derive from another query
+      const investmentId = toPositiveInt(row.investment_id, 'investment_id');
+      const ownerUserId = toPositiveInt(row.owner_user_id, 'owner_user_id');
+      const ownerUsername = String(row.owner_username);
+      const ownerWallet =
+        row.owner_wallet == null || row.owner_wallet === ''
+          ? null
+          : String(row.owner_wallet).trim();
+
+      const owner = {
+        userId: ownerUserId,
+        username: ownerUsername,
+        walletAddress: ownerWallet,
+      };
+
+      const invSnapshot = {
+        id: investmentId,
+        user_id: ownerUserId,
+        plan_type: row.plan_type,
+        token_amount: row.token_amount,
+        total_return: row.total_return,
+        daily_roi_rate: row.daily_roi_rate,
+        roi_received: row.roi_received,
+        last_roi_date: row.last_roi_date,
+        status: row.status,
+        income_eligible: row.income_eligible,
+      };
+
       await conn.beginTransaction();
       try {
         const [lockedRows] = await conn.query(
-          `SELECT * FROM investments WHERE id = ? AND status = 'active' FOR UPDATE`,
-          [inv.id]
+          `SELECT id, user_id, status FROM investments WHERE id = ${investmentId} AND status = 'active' FOR UPDATE`
         );
-        const row = lockedRows[0];
-        if (!row) {
+        const locked = lockedRows[0];
+        if (!locked) {
           await conn.rollback();
           failures.push({
-            investmentId: inv.id,
-            userId: inv.user_id,
-            username: inv.username,
+            investmentId,
+            userId: ownerUserId,
+            username: ownerUsername,
             error: 'Investment missing or inactive under lock (skipped)',
           });
           continue;
         }
-        if (Number(row.user_id) !== Number(inv.user_id)) {
+
+        const lockedOwnerId = toPositiveInt(locked.user_id, 'locked.user_id');
+        if (lockedOwnerId !== ownerUserId) {
           await conn.rollback();
           failures.push({
-            investmentId: inv.id,
-            userId: inv.user_id,
-            username: inv.username,
-            error: `user_id mismatch under lock: list=${inv.user_id} locked=${row.user_id}`,
+            investmentId,
+            userId: ownerUserId,
+            username: ownerUsername,
+            error: `user_id mismatch under lock: join=${ownerUserId} locked=${lockedOwnerId}`,
           });
           continue;
         }
 
-        const [userRows] = await conn.query(
-          'SELECT id, username, wallet_address FROM users WHERE id = ? LIMIT 1',
-          [row.user_id]
+        const result = await processInvestmentRoi(
+          conn,
+          invSnapshot,
+          owner,
+          effectiveDescription,
+          asOfDate
         );
-        if (!userRows[0]) {
-          await conn.rollback();
-          failures.push({
-            investmentId: inv.id,
-            userId: row.user_id,
-            error: `User id=${row.user_id} deleted — orphan investment skipped`,
-          });
-          continue;
-        }
-
-        const locked = {
-          ...row,
-          username: userRows[0].username,
-          wallet_address: userRows[0].wallet_address,
-        };
-
-        const result = await processInvestmentRoi(conn, locked, effectiveDescription, asOfDate);
         await conn.commit();
 
         if (result && result.roi > 0) {
@@ -335,14 +382,14 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
       } catch (err) {
         await conn.rollback();
         const fail = {
-          investmentId: inv.id,
-          userId: inv.user_id,
-          username: inv.username,
+          investmentId,
+          userId: ownerUserId,
+          username: ownerUsername,
           error: err.message,
         };
         failures.push(fail);
         console.error(
-          `Payout failed for investment ${inv.id} userId=${inv.user_id} (${inv.username}):`,
+          `Payout failed for investment ${investmentId} userId=${ownerUserId} (${ownerUsername}):`,
           err.message
         );
       }

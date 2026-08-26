@@ -1,6 +1,6 @@
 import { getBlockchainConfig, isBlockchainMode, sendTokenPayout, getWalletTokenBalance } from './blockchainService.js';
 
-/** Strict positive integer — rejects floats like 1.06 (ROI amounts) so wrong args fail loudly. */
+/** Strict positive integer — rejects floats like 1.06 (ROI amounts). */
 export function toPositiveInt(value, label = 'id') {
   if (typeof value === 'number') {
     if (!Number.isInteger(value) || value <= 0) {
@@ -21,6 +21,9 @@ export function toPositiveInt(value, label = 'id') {
 
 /**
  * Credit XIT to a user — on-chain transfer in testnet/real, DB xit_balance in demo.
+ *
+ * IMPORTANT: user id is embedded as a validated integer (not a `?` placeholder) to avoid
+ * mysql2/MariaDB prepared-statement parameter mix-ups on reused connections.
  */
 export async function creditUserXit(conn, userId, amount, options = {}) {
   if (amount <= 0) {
@@ -31,9 +34,9 @@ export async function creditUserXit(conn, userId, amount, options = {}) {
   const config = await getBlockchainConfig(conn);
   const chainMode = isBlockchainMode(config.platformMode);
 
+  // Validated int only — safe to inline (no user-controlled string)
   const [users] = await conn.query(
-    'SELECT id, username, wallet_address FROM users WHERE id = ? LIMIT 1',
-    [uid]
+    `SELECT id, username, wallet_address FROM users WHERE id = ${uid} LIMIT 1`
   );
 
   if (users.length === 0) {
@@ -43,9 +46,10 @@ export async function creditUserXit(conn, userId, amount, options = {}) {
   }
 
   const user = users[0];
-  if (Number(user.id) !== uid) {
+  const rowId = toPositiveInt(user.id, 'users.id');
+  if (rowId !== uid) {
     throw new Error(
-      `User id mismatch: requested=${uid} but row.id=${user.id} username=${user.username}`
+      `User id mismatch: requested=${uid} but row.id=${rowId} username=${user.username}`
     );
   }
 
@@ -55,8 +59,22 @@ export async function creditUserXit(conn, userId, amount, options = {}) {
     );
   }
 
-  const walletRaw = user.wallet_address;
-  const walletAddress = typeof walletRaw === 'string' ? walletRaw.trim() : walletRaw;
+  let walletAddress =
+    typeof options.walletAddress === 'string' ? options.walletAddress.trim() : null;
+  if (!walletAddress) {
+    const walletRaw = user.wallet_address;
+    walletAddress = typeof walletRaw === 'string' ? walletRaw.trim() : walletRaw;
+  }
+
+  if (
+    options.walletAddress &&
+    user.wallet_address &&
+    String(options.walletAddress).trim().toLowerCase() !== String(user.wallet_address).trim().toLowerCase()
+  ) {
+    throw new Error(
+      `Wallet mismatch for userId=${uid}: option=${options.walletAddress} db=${user.wallet_address}`
+    );
+  }
 
   let txHash = null;
   let chainId = null;
@@ -75,10 +93,10 @@ export async function creditUserXit(conn, userId, amount, options = {}) {
     chainId = payout.chainId;
     onChainStatus = 'confirmed';
   } else {
-    await conn.query('UPDATE users SET xit_balance = xit_balance + ? WHERE id = ?', [amount, uid]);
+    await conn.query(`UPDATE users SET xit_balance = xit_balance + ? WHERE id = ${uid}`, [amount]);
   }
 
-  await conn.query('UPDATE users SET total_earned = total_earned + ? WHERE id = ?', [amount, uid]);
+  await conn.query(`UPDATE users SET total_earned = total_earned + ? WHERE id = ${uid}`, [amount]);
 
   return {
     credited: amount,

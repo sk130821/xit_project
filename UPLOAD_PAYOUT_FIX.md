@@ -1,44 +1,34 @@
-# Production upload — orphan cleanup + payout user-id fix
+# Production upload — wrong-user ROI fix (user m / id=2)
 
-## 1) Upload these backend files
+## Root cause
+mysql2 prepared `?` params on a reused connection were suspected of binding the wrong
+value (ROI `days=2` leaked as `userId=2` → seed user `m`).
+
+## Fix
+1. JOIN uses explicit aliases: `owner_user_id`, `owner_username`, `owner_wallet`
+2. Owner identity frozen as plain numbers/strings before any credit
+3. User lookups use validated integer in SQL (`WHERE id = ${uid}`) — no `?` for user id
+4. `expectedUsername` + wallet checks before on-chain send
+
+## Upload these files
 - `services/tokenPayoutService.js`
 - `services/payoutService.js`
-- `services/payoutDebugService.js` (if not already)
-- `controllers/cronController.js`
-- `scripts/cleanupOrphanInvestments.js`
-- `scripts/debugPayout.js`
-- `migrations/009_cleanup_orphan_investments.sql`
 
-## 2) On server — cleanup orphans
+## On server
 ```bash
 cd /home/xittoken/back.xittoken.co
-node scripts/cleanupOrphanInvestments.js
+grep -n "owner_user_id\|ownerWallet\|Safety abort" services/payoutService.js
 ```
 
-Or phpMyAdmin SQL:
+phpMyAdmin:
 ```sql
-DELETE i FROM investments i
-LEFT JOIN users u ON u.id = i.user_id
-WHERE u.id IS NULL;
+DELETE FROM payout_runs WHERE run_date = '2026-08-26' AND run_type = 'auto';
 ```
 
-## 3) Clear today's empty auto run (so cron can run again)
-```sql
-DELETE FROM payout_runs
-WHERE run_date = '2026-08-26' AND run_type = 'auto';
+Then **Restart Node** → Manual Payout or cron.
+
+## Expect log
 ```
-
-## 4) Restart Node app in cPanel
-
-## 5) Test
-```text
-https://back.xittoken.co/api/cron/debug-payout?secret=YOUR_CRON_SECRET
+[Payout] credit inv=58 owner=50(sandeep) roi=... days=2 wallet=yes
 ```
-Then Manual Payout or cron.
-
-## What was fixed
-1. Delete investments whose users were deleted (A1–C1 orphans)
-2. Payout only processes investments INNER JOINed to existing users
-3. Strict integer userId — rejects ROI floats mistaken as ids
-4. Verify DB user row id + username match investment owner before credit
-5. Clearer failure logs with username
+NOT `username=m` / `userId=2`.
