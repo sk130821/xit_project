@@ -24,6 +24,11 @@ export function toPositiveInt(value, label = 'id') {
  *
  * IMPORTANT: user id is embedded as a validated integer (not a `?` placeholder) to avoid
  * mysql2/MariaDB prepared-statement parameter mix-ups on reused connections.
+ *
+ * options:
+ *   expectedUsername — must match DB username
+ *   walletAddress — prefer this wallet (frozen from JOIN)
+ *   skipIfNoWallet — for level/reward uplines: return skipped instead of throwing
  */
 export async function creditUserXit(conn, userId, amount, options = {}) {
   if (amount <= 0) {
@@ -31,14 +36,6 @@ export async function creditUserXit(conn, userId, amount, options = {}) {
   }
 
   const uid = toPositiveInt(userId, 'userId');
-
-  // Guard: never allow ROI days (often 1–5) to be treated as a user id when a real owner was expected
-  if (options.expectedUsername && uid <= 5 && !options.allowLowUserId) {
-    console.warn(
-      `[creditUserXit] low userId=${uid} with expectedUsername=${options.expectedUsername} — verify owner freeze`
-    );
-  }
-
   const config = await getBlockchainConfig(conn);
   const chainMode = isBlockchainMode(config.platformMode);
 
@@ -90,6 +87,22 @@ export async function creditUserXit(conn, userId, amount, options = {}) {
 
   if (chainMode) {
     if (!walletAddress) {
+      if (options.skipIfNoWallet) {
+        console.warn(
+          `[creditUserXit] skip no-wallet userId=${uid} username=${user.username} amount=${amount}`
+        );
+        return {
+          credited: 0,
+          skipped: true,
+          skipReason: 'no_wallet',
+          txHash: null,
+          chainId: null,
+          onChainStatus: 'skipped',
+          chainMode,
+          userId: uid,
+          username: user.username,
+        };
+      }
       throw new Error(
         `Link your MetaMask wallet to receive on-chain XIT income | ` +
           `userId=${uid} username=${user.username} walletRaw=NULL ` +

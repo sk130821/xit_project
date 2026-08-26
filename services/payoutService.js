@@ -10,7 +10,7 @@ import { investmentHasIncomeEligible } from './investmentService.js';
 import { getISTDateString } from '../utils/istDate.js';
 
 /** Bump when uploading — must appear in cron.log or server is still on old file */
-export const PAYOUT_BUILD = '2026-08-26-owner-freeze-v3';
+export const PAYOUT_BUILD = '2026-08-26-skip-nowallet-upline-v4';
 
 export function calculateInvestmentRoi(inv, asOfDate = null) {
   const today = asOfDate || getISTDateString();

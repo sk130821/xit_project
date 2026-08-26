@@ -40,7 +40,13 @@ export async function distributeReferralBonus(conn, buyerId, tokenAmount) {
 
   const bonus = (tokenAmount * bonusPercent) / 100;
 
-  const payout = await creditUserXit(conn, sponsorId, bonus);
+  const payout = await creditUserXit(conn, sponsorId, bonus, { skipIfNoWallet: true });
+  if (!payout.credited) {
+    console.warn(
+      `[ReferralBonus] skipped sponsor=${sponsorId} amount=${bonus} reason=${payout.skipReason || 'not_credited'}`
+    );
+    return 0;
+  }
 
   await insertIncomeTransaction(conn, {
     userId: sponsorId,
@@ -74,9 +80,16 @@ export async function distributeLevelBonus(conn, earnerId, roiAmount, investment
     const bonus = (roiAmount * Number(upline.percentage)) / 100;
     if (bonus <= 0) continue;
 
-    totalBonus += bonus;
+    const payout = await creditUserXit(conn, upline.upline_id, bonus, { skipIfNoWallet: true });
+    if (!payout.credited) {
+      console.warn(
+        `[LevelBonus] skipped upline=${upline.upline_id} level=${upline.level} ` +
+          `amount=${bonus} reason=${payout.skipReason || 'not_credited'}`
+      );
+      continue;
+    }
 
-    const payout = await creditUserXit(conn, upline.upline_id, bonus);
+    totalBonus += bonus;
 
     await insertIncomeTransaction(conn, {
       userId: upline.upline_id,
@@ -231,20 +244,25 @@ export async function distributeRewardBonus(conn, earnerId, roiAmount, investmen
             earnerName = earnerRow[0]?.username || 'member';
           }
 
-          const payout = await creditUserXit(conn, sponsorId, bonus);
+          const payout = await creditUserXit(conn, sponsorId, bonus, { skipIfNoWallet: true });
+          if (!payout.credited) {
+            console.warn(
+              `[RewardBonus] skipped sponsor=${sponsorId} amount=${bonus} reason=${payout.skipReason || 'not_credited'}`
+            );
+          } else {
+            await insertIncomeTransaction(conn, {
+              userId: sponsorId,
+              type: 'reward_bonus',
+              amount: bonus,
+              description: `Reward bonus (${currentTier.tier_name}, ${percentage}% of ${earnerName} ROI)`,
+              relatedUserId: earnerId,
+              investmentId,
+              payout,
+              createdAt,
+            });
 
-          await insertIncomeTransaction(conn, {
-            userId: sponsorId,
-            type: 'reward_bonus',
-            amount: bonus,
-            description: `Reward bonus (${currentTier.tier_name}, ${percentage}% of ${earnerName} ROI)`,
-            relatedUserId: earnerId,
-            investmentId,
-            payout,
-            createdAt,
-          });
-
-          totalPaid += bonus;
+            totalPaid += bonus;
+          }
         }
       }
     }
