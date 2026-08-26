@@ -31,6 +31,14 @@ export async function creditUserXit(conn, userId, amount, options = {}) {
   }
 
   const uid = toPositiveInt(userId, 'userId');
+
+  // Guard: never allow ROI days (often 1–5) to be treated as a user id when a real owner was expected
+  if (options.expectedUsername && uid <= 5 && !options.allowLowUserId) {
+    console.warn(
+      `[creditUserXit] low userId=${uid} with expectedUsername=${options.expectedUsername} — verify owner freeze`
+    );
+  }
+
   const config = await getBlockchainConfig(conn);
   const chainMode = isBlockchainMode(config.platformMode);
 

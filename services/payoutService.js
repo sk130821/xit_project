@@ -9,6 +9,9 @@ import { getBlockchainConfig, isBlockchainMode } from './blockchainService.js';
 import { investmentHasIncomeEligible } from './investmentService.js';
 import { getISTDateString } from '../utils/istDate.js';
 
+/** Bump when uploading — must appear in cron.log or server is still on old file */
+export const PAYOUT_BUILD = '2026-08-26-owner-freeze-v3';
+
 export function calculateInvestmentRoi(inv, asOfDate = null) {
   const today = asOfDate || getISTDateString();
   const lastRoi = new Date(inv.last_roi_date).toISOString().split('T')[0];
@@ -141,10 +144,11 @@ async function processInvestmentRoi(conn, inv, owner, description = 'Daily ROI p
     throw new Error(`Investment ${investmentId} missing owner username`);
   }
 
-  // Guard: never credit if days somehow leaked into owner id (historical bug symptom)
-  if (calc.days != null && Number(calc.days) === ownerUserId && ownerUserId < 10) {
-    console.warn(
-      `[Payout] unusual: ownerUserId=${ownerUserId} equals calc.days=${calc.days} for inv=${investmentId}`
+  // Hard abort: historical bug credited seed user id=2 when daysElapsed=2
+  if (calc.days != null && Number(calc.days) === ownerUserId && ownerUserId <= 5) {
+    throw new Error(
+      `Refusing credit: ownerUserId=${ownerUserId} equals ROI days=${calc.days} ` +
+        `(likely stale payoutService on server — re-upload PAYOUT_BUILD=${PAYOUT_BUILD})`
     );
   }
 
@@ -241,7 +245,8 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
   try {
     const [[dbInfo]] = await conn.query('SELECT DATABASE() AS current_db');
     console.log(
-      `[Payout] start runType=${runType} runDate=${runDate} db=${dbInfo?.current_db} envDB=${process.env.DB_NAME || 'MISSING'}`
+      `[Payout] start build=${PAYOUT_BUILD} runType=${runType} runDate=${runDate} ` +
+        `db=${dbInfo?.current_db} envDB=${process.env.DB_NAME || 'MISSING'}`
     );
 
     if (isAutoDaily) {
