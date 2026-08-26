@@ -276,7 +276,6 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
          i.roi_received,
          i.last_roi_date,
          i.status,
-         i.income_eligible,
          u.username AS owner_username,
          u.wallet_address AS owner_wallet
        FROM investments i
@@ -325,7 +324,6 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
         roi_received: row.roi_received,
         last_roi_date: row.last_roi_date,
         status: row.status,
-        income_eligible: row.income_eligible,
       };
 
       await conn.beginTransaction();

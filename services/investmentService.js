@@ -77,9 +77,9 @@ export async function createInvestmentForUser(conn, userId, tokenAmount, planTyp
   }
 
   const [invResult] = await conn.query(
-    `INSERT INTO investments (user_id, plan_type, token_amount, total_return, daily_roi_rate, sellable_amount, locked_amount, end_date, income_eligible)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [userId, resolvedPlan, tokenAmount, totalReturn, plan.dailyRoi, sellable, locked, endDate, incomeEligible]
+    `INSERT INTO investments (user_id, plan_type, token_amount, total_return, daily_roi_rate, sellable_amount, locked_amount, end_date)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [userId, resolvedPlan, tokenAmount, totalReturn, plan.dailyRoi, sellable, locked, endDate]
   );
 
   if (!skipTransaction) {
