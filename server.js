@@ -9,7 +9,7 @@ import adminRoutes from './routes/adminRoutes.js';
 import adminAuthRoutes from './routes/adminAuthRoutes.js';
 import blockchainRoutes from './routes/blockchainRoutes.js';
 import { startAutoRoiCron } from './jobs/autoRoiCron.js';
-import { runDailyPayoutCron } from './controllers/cronController.js';
+import { runDailyPayoutCron, debugPayoutCron } from './controllers/cronController.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -33,11 +33,17 @@ app.use(cors({
 app.use(express.json());
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'XIT Token API running' });
+  res.json({
+    status: 'ok',
+    message: 'XIT Token API running',
+    dbNameEnv: process.env.DB_NAME || null,
+    time: new Date().toISOString(),
+  });
 });
 
 app.get('/api/cron/daily-payout', runDailyPayoutCron);
 app.post('/api/cron/daily-payout', runDailyPayoutCron);
+app.get('/api/cron/debug-payout', debugPayoutCron);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/tokens', tokenRoutes);

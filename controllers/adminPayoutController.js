@@ -1,6 +1,7 @@
-import { pool } from '../db.js';
 import { previewPayout, runPayout } from '../services/payoutService.js';
 import { getBlockchainConfig } from '../services/blockchainService.js';
+import { buildPayoutDebugReport } from '../services/payoutDebugService.js';
+import { pool } from '../db.js';
 
 function parsePayoutDate(raw) {
   if (!raw) return { date: null };
@@ -56,6 +57,20 @@ export async function getPayoutPreview(req, res) {
   } catch (err) {
     console.error('Payout preview error:', err);
     res.status(500).json({ error: 'Failed to generate payout preview' });
+  }
+}
+
+export async function getPayoutDebug(req, res) {
+  try {
+    const asOfDate = req.query?.date || null;
+    if (asOfDate && !/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD.' });
+    }
+    const report = await buildPayoutDebugReport({ asOfDate });
+    res.json({ success: true, ...report });
+  } catch (err) {
+    console.error('Payout debug error:', err);
+    res.status(500).json({ error: err.message || 'Failed to build payout debug report' });
   }
 }
 

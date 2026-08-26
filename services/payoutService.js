@@ -194,11 +194,18 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
   let totalRoi = 0;
   let totalLevelBonus = 0;
   let totalRewardBonus = 0;
+  const failures = [];
+  const successes = [];
 
   const runDate = asOfDate || getISTDateString();
   const isAutoDaily = runType === 'auto' && !asOfDate;
 
   try {
+    const [[dbInfo]] = await conn.query('SELECT DATABASE() AS current_db');
+    console.log(
+      `[Payout] start runType=${runType} runDate=${runDate} db=${dbInfo?.current_db} envDB=${process.env.DB_NAME || 'MISSING'}`
+    );
+
     if (isAutoDaily) {
       const [existing] = await conn.query(
         `SELECT id, investments_processed, total_payout, created_at
@@ -214,6 +221,8 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
           investmentsProcessed: Number(existing[0].investments_processed),
           totalPayout: Number(existing[0].total_payout),
           alreadyRanAt: existing[0].created_at,
+          database: dbInfo?.current_db,
+          envDbName: process.env.DB_NAME || null,
         };
       }
     }
@@ -232,10 +241,19 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
     const chainMode = isBlockchainMode(config.platformMode);
     const effectiveDescription = chainMode ? 'Daily ROI payout (on-chain)' : description;
 
+    console.log(
+      `[Payout] active=${investments.length} mode=${config.platformMode} chainMode=${chainMode}`
+    );
+
     for (const inv of investments) {
       await conn.beginTransaction();
       try {
         const [locked] = await conn.query('SELECT * FROM investments WHERE id = ? FOR UPDATE', [inv.id]);
+        if (!locked[0]) {
+          await conn.rollback();
+          failures.push({ investmentId: inv.id, error: 'Investment row missing under FOR UPDATE' });
+          continue;
+        }
         const result = await processInvestmentRoi(conn, locked[0], effectiveDescription, asOfDate);
         await conn.commit();
 
@@ -244,10 +262,25 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
           totalRoi += result.roi;
           totalLevelBonus += result.levelBonus || 0;
           totalRewardBonus += result.rewardBonus || 0;
+          successes.push({
+            investmentId: result.investmentId,
+            userId: result.userId,
+            roi: result.roi,
+            days: result.days,
+          });
         }
       } catch (err) {
         await conn.rollback();
-        console.error(`Payout failed for investment ${inv.id}:`, err.message);
+        const fail = {
+          investmentId: inv.id,
+          userId: inv.user_id,
+          error: err.message,
+        };
+        failures.push(fail);
+        console.error(
+          `Payout failed for investment ${inv.id} userId=${inv.user_id}:`,
+          err.message
+        );
       }
     }
 
@@ -273,6 +306,10 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
       runId = runResult.insertId;
     }
 
+    console.log(
+      `[Payout] done processed=${investmentsProcessed} roi=${totalRoi} failures=${failures.length} runId=${runId}`
+    );
+
     return {
       skipped: false,
       runId,
@@ -282,6 +319,12 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
       totalRewardBonus,
       totalPayout,
       payoutDate: runDate,
+      database: dbInfo?.current_db,
+      envDbName: process.env.DB_NAME || null,
+      successCount: successes.length,
+      failureCount: failures.length,
+      successes: successes.slice(0, 50),
+      failures: failures.slice(0, 100),
     };
   } finally {
     conn.release();

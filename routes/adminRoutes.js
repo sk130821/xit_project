@@ -6,7 +6,7 @@ import {
   getLevelBonusRates, getRewardTiers,
 } from '../controllers/adminController.js';
 import {
-  getPayoutPreview, triggerPayout, getPayoutRuns,
+  getPayoutPreview, triggerPayout, getPayoutRuns, getPayoutDebug,
   getDailyPayoutSummary, getTradeHistory, getDailyTradeSummary,
 } from '../controllers/adminPayoutController.js';
 import { getBusinessReport } from '../controllers/adminReportController.js';
@@ -28,6 +28,7 @@ router.post('/update-reward-tier', adminAuthMiddleware, updateRewardTier);
 router.post('/update-setting', adminAuthMiddleware, updateSetting);
 
 router.get('/payout/preview', adminAuthMiddleware, getPayoutPreview);
+router.get('/payout/debug', adminAuthMiddleware, getPayoutDebug);
 router.post('/payout/run', adminAuthMiddleware, triggerPayout);
 router.get('/payout/runs', adminAuthMiddleware, getPayoutRuns);
 router.get('/payout/daily', adminAuthMiddleware, getDailyPayoutSummary);

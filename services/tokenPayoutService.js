@@ -8,11 +8,29 @@ export async function creditUserXit(conn, userId, amount) {
     return { credited: 0, txHash: null, chainId: null, onChainStatus: 'demo', chainMode: false };
   }
 
+  const uid = Number(userId);
+  if (!Number.isFinite(uid) || uid <= 0) {
+    throw new Error(`Invalid userId for XIT credit: ${JSON.stringify(userId)} (type=${typeof userId})`);
+  }
+
   const config = await getBlockchainConfig(conn);
   const chainMode = isBlockchainMode(config.platformMode);
 
-  const [users] = await conn.query('SELECT wallet_address FROM users WHERE id = ?', [userId]);
-  const walletAddress = users[0]?.wallet_address;
+  const [[dbInfo]] = await conn.query('SELECT DATABASE() AS current_db');
+  const [users] = await conn.query(
+    'SELECT id, username, wallet_address FROM users WHERE id = ? LIMIT 1',
+    [uid]
+  );
+
+  if (users.length === 0) {
+    throw new Error(
+      `User id=${uid} not found in DB=${dbInfo?.current_db || '?'} (env DB_NAME=${process.env.DB_NAME || 'MISSING'})`
+    );
+  }
+
+  const user = users[0];
+  const walletRaw = user.wallet_address;
+  const walletAddress = typeof walletRaw === 'string' ? walletRaw.trim() : walletRaw;
 
   let txHash = null;
   let chainId = null;
@@ -20,17 +38,24 @@ export async function creditUserXit(conn, userId, amount) {
 
   if (chainMode) {
     if (!walletAddress) {
-      throw new Error('Link your MetaMask wallet to receive on-chain XIT income');
+      throw new Error(
+        `Link your MetaMask wallet to receive on-chain XIT income | ` +
+          `userId=${uid} username=${user.username} ` +
+          `walletRaw=${walletRaw === null || walletRaw === undefined ? 'NULL' : JSON.stringify(walletRaw)} ` +
+          `walletLen=${walletRaw ? String(walletRaw).length : 0} ` +
+          `db=${dbInfo?.current_db || '?'} envDB=${process.env.DB_NAME || 'MISSING'} ` +
+          `mode=${config.platformMode}`
+      );
     }
     const payout = await sendTokenPayout(conn, walletAddress, amount);
     txHash = payout.txHash;
     chainId = payout.chainId;
     onChainStatus = 'confirmed';
   } else {
-    await conn.query('UPDATE users SET xit_balance = xit_balance + ? WHERE id = ?', [amount, userId]);
+    await conn.query('UPDATE users SET xit_balance = xit_balance + ? WHERE id = ?', [amount, uid]);
   }
 
-  await conn.query('UPDATE users SET total_earned = total_earned + ? WHERE id = ?', [amount, userId]);
+  await conn.query('UPDATE users SET total_earned = total_earned + ? WHERE id = ?', [amount, uid]);
 
   return { credited: amount, txHash, chainId, onChainStatus, chainMode };
 }
