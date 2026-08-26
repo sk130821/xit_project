@@ -2,6 +2,10 @@
 # XIT Token — Daily ROI cron (12:00 AM IST = 30 18 * * * on UTC servers)
 # cPanel command:
 #   /bin/bash /home/xittoken/back.xittoken.co/scripts/cpanel-cron.sh
+#
+# IMPORTANT: Prefer Node (disk files) over HTTP API.
+# HTTP hits the long-running Node app which keeps OLD code until cPanel Restart.
+# After git pull, Node fallback always uses the updated services/*.js on disk.
 
 set -u
 
@@ -10,8 +14,9 @@ APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="$APP_DIR/logs"
 LOG_FILE="$LOG_DIR/cron.log"
 API_URL="${CRON_API_URL:-https://back.xittoken.co/api/cron/daily-payout}"
+# default: node (safe after git pull). Set CRON_MODE=http to use API first.
+CRON_MODE="${CRON_MODE:-node}"
 
-# cPanel cron has minimal PATH
 export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 CURL_BIN=""
@@ -38,17 +43,16 @@ get_env() {
 }
 
 resolve_secret() {
-  # 1) export CRON_SECRET=... in cron command
   if [ -n "${CRON_SECRET:-}" ]; then
     echo "$CRON_SECRET"
     return
   fi
-  # 2) physical .env file (cPanel Node UI vars do NOT write here automatically)
   get_env CRON_SECRET
 }
 
 log "==== Daily payout cron started ===="
 log "APP_DIR=$APP_DIR"
+log "CRON_MODE=$CRON_MODE"
 log "Server time: $(date)"
 
 cd "$APP_DIR" || {
@@ -64,9 +68,6 @@ if [ -z "$SECRET" ]; then
     log "ERROR: CRON_SECRET not found"
   fi
   log "NOTE: cPanel → Node.js → Environment Variables is NOT the same as .env file"
-  log "FIX: Run on server:"
-  log "  echo 'CRON_SECRET=your_cron_secret_sandeep' >> $APP_DIR/.env"
-  log "Use the SAME value as in cPanel Environment Variables, then Restart Node app"
   exit 1
 fi
 log "CRON_SECRET: set (${#SECRET} chars)"
@@ -97,12 +98,17 @@ run_node_fallback() {
     return 1
   fi
 
-  log "Running Node fallback: $NODE_BIN scripts/cpanelCron.js"
+  log "Running Node (disk files): $NODE_BIN scripts/cpanelCron.js"
   CRON_SECRET="$SECRET" "$NODE_BIN" "$APP_DIR/scripts/cpanelCron.js" >> "$LOG_FILE" 2>&1
   return $?
 }
 
-if [ -n "$CURL_BIN" ]; then
+run_http() {
+  if [ -z "$CURL_BIN" ]; then
+    log "curl not found — cannot use HTTP mode"
+    return 1
+  fi
+
   TMP_BODY="$LOG_DIR/.cron_last_response.txt"
   HTTP_CODE="$("$CURL_BIN" -sS --max-time 180 \
     -o "$TMP_BODY" \
@@ -115,28 +121,32 @@ if [ -n "$CURL_BIN" ]; then
   log "$RESPONSE"
 
   if [ "$HTTP_CODE" = "200" ]; then
+    return 0
+  fi
+  return 1
+}
+
+if [ "$CRON_MODE" = "http" ]; then
+  if run_http; then
     log "==== Cron finished OK (HTTP) ===="
     exit 0
   fi
-
-  if [ "$HTTP_CODE" = "401" ]; then
-    log "ERROR: Invalid CRON_SECRET — fix .env on server (must match exactly)"
-    exit 1
+  log "HTTP cron failed — trying Node once"
+  if run_node_fallback; then
+    log "==== Cron finished OK (Node) ===="
+    exit 0
   fi
-
-  if [ "$HTTP_CODE" = "503" ]; then
-    log "ERROR: CRON_SECRET not loaded in Node app — restart Node application in cPanel"
-    exit 1
-  fi
-
-  log "HTTP cron failed (code $HTTP_CODE) — trying Node fallback once"
 else
-  log "curl not found — using Node fallback"
-fi
-
-if run_node_fallback; then
-  log "==== Cron finished OK (Node) ===="
-  exit 0
+  # Default: Node first (uses git-pulled files immediately, no Passenger restart needed)
+  if run_node_fallback; then
+    log "==== Cron finished OK (Node) ===="
+    exit 0
+  fi
+  log "Node failed — trying HTTP once"
+  if run_http; then
+    log "==== Cron finished OK (HTTP) ===="
+    exit 0
+  fi
 fi
 
 log "==== Cron FAILED ===="

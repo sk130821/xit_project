@@ -1,54 +1,33 @@
 # Production upload — ROI wrong-user + income_eligible fix
 
-## What your 06:47 / 06:52 logs prove
-1. `Unknown column 'i.income_eligible'` → **old** `payoutService.js` still on server
-2. `investment 58 userId=50 (sandeep)` then `userId=2 username=m` → credit used **days=2** as user id (stale payout path; `expectedUsername` not deployed)
+## Root cause of 07:00 failure (still userId=2 / m)
+`cpanel-cron.sh` was calling **HTTP** `https://back.xittoken.co/api/cron/daily-payout` first.
+That hits the **long-running Node app** (old code in memory).
+`git pull` updates disk files, but HTTP keeps serving old JS until **cPanel → Restart**.
 
-Local code is already fixed. Server files were not replaced (or Node not restarted).
+Indented `Payout failed...` lines in cron.log are the **HTTP JSON body**, not Node fallback.
 
-## Upload THESE files (overwrite on server)
-```
-backend/services/payoutService.js
-backend/services/tokenPayoutService.js
-backend/services/investmentService.js
-```
+## Fix applied
+- Cron default mode is now **Node first** (reads disk after every `git pull`)
+- Response includes `payoutBuild: 2026-08-26-owner-freeze-v3`
 
-## Verify BEFORE restart (SSH or File Manager → Edit)
+## On server NOW
 ```bash
 cd /home/xittoken/back.xittoken.co
-grep -n "PAYOUT_BUILD\|owner_user_id\|income_eligible" services/payoutService.js
+git pull origin main
+
+# phpMyAdmin:
+# DELETE FROM payout_runs WHERE run_date = '2026-08-26' AND run_type = 'auto';
+
+# Optional but recommended: cPanel → Setup Node.js App → Restart
+
+# Manual test (disk files, no wait for cron):
+/home/xittoken/nodevenv/back.xittoken.co/20/bin/node scripts/cpanelCron.js
 ```
 
-Must show:
-- `PAYOUT_BUILD = '2026-08-26-owner-freeze-v3'`
-- `owner_user_id` in SELECT
-- **NO** `i.income_eligible` in the active investments SELECT
-
-Also:
-```bash
-grep -n "WHERE id = \${uid}\|expectedUsername" services/tokenPayoutService.js
-```
-
-## phpMyAdmin (required or cron skips / blocks)
-```sql
-DELETE FROM payout_runs WHERE run_date = '2026-08-26' AND run_type = 'auto';
-```
-
-## Restart Node (cPanel → Setup Node.js App → Restart)
-
-## Cron for next test
-```
-55 6 * * *
-```
-(or any soon UTC minute) + same command:
-```bash
-/bin/bash /home/xittoken/back.xittoken.co/scripts/cpanel-cron.sh
-```
-
-## Success log (must see build stamp)
+## Expect log
 ```
 [Payout] start build=2026-08-26-owner-freeze-v3 ...
-[Payout] credit inv=58 owner=50(sandeep) roi=... days=2 wallet=yes
+[Payout] credit inv=58 owner=50(sandeep) ... wallet=yes
 ```
-
-If you still see `username=m` or `income_eligible` → file not uploaded or Node not restarted.
+NOT `username=m` / `userId=2`.

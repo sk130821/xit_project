@@ -258,6 +258,7 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
       if (existing.length > 0) {
         return {
           skipped: true,
+          payoutBuild: PAYOUT_BUILD,
           reason: 'Daily payout already completed for this IST date',
           runId: existing[0].id,
           runDate,
@@ -426,6 +427,7 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
 
     return {
       skipped: false,
+      payoutBuild: PAYOUT_BUILD,
       runId,
       investmentsProcessed,
       totalRoi,
