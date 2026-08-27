@@ -103,7 +103,7 @@ function getWallet(privateKey, provider) {
   return new ethers.Wallet(privateKey, provider);
 }
 
-export async function verifyBuyTransaction(conn, txHash, expectedPaymentAmount, fromAddress) {
+export async function verifyBuyTransaction(conn, txHash, expectedPaymentAmount, fromAddress = null) {
   const config = await getBlockchainConfig(conn);
 
   if (!config.adminTreasuryWallet) {
@@ -127,42 +127,50 @@ export async function verifyBuyTransaction(conn, txHash, expectedPaymentAmount, 
   const treasury = config.adminTreasuryWallet.toLowerCase();
   const expectedWei = ethers.parseUnits(expectedPaymentAmount.toFixed(8), config.paymentDecimals);
 
-  // Buys must be official USDT only — fake USDT contracts rejected
   const officialUsdt = assertOfficialUsdt(config.chainId, config.paymentTokenAddress);
 
-  {
-    const iface = new ethers.Interface(ERC20_ABI);
-    let found = false;
+  const iface = new ethers.Interface(ERC20_ABI);
+  let payerAddress = null;
+  let paidValue = null;
 
-    for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== officialUsdt) continue;
-      try {
-        const parsed = iface.parseLog({ topics: log.topics, data: log.data });
-        if (parsed?.name === 'Transfer') {
-          const to = parsed.args.to.toLowerCase();
-          const value = parsed.args.value;
-          const from = parsed.args.from.toLowerCase();
-          if (to === treasury && value >= expectedWei) {
-            if (fromAddress && from !== fromAddress.toLowerCase()) {
-              throw new Error('Transaction sender does not match connected wallet');
-            }
-            found = true;
-            break;
-          }
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== officialUsdt) continue;
+    try {
+      const parsed = iface.parseLog({ topics: log.topics, data: log.data });
+      if (parsed?.name === 'Transfer') {
+        const to = parsed.args.to.toLowerCase();
+        const value = parsed.args.value;
+        const from = parsed.args.from.toLowerCase();
+        if (to === treasury && value >= expectedWei) {
+          payerAddress = from;
+          paidValue = value;
+          break;
         }
-      } catch (err) {
-        if (err.message?.includes('connected wallet')) throw err;
       }
-    }
-
-    if (!found) {
-      throw new Error(
-        `Valid official USDT transfer to treasury not found. Fake USDT is not accepted. Use ${officialUsdt}`
-      );
+    } catch {
+      // skip unparseable
     }
   }
 
-  return { chainId: config.chainId, config };
+  if (!payerAddress) {
+    throw new Error(
+      `Valid official USDT transfer to treasury not found. Fake USDT is not accepted. Use ${officialUsdt}`
+    );
+  }
+
+  // Soft check: warn path handled by caller — payer is source of truth for delivery
+  if (fromAddress && payerAddress !== String(fromAddress).toLowerCase()) {
+    console.warn(
+      `[verifyBuy] linked wallet ${fromAddress} != payer ${payerAddress} — will sync to payer`
+    );
+  }
+
+  return {
+    chainId: config.chainId,
+    config,
+    payerAddress,
+    paidValue: paidValue?.toString?.() || null,
+  };
 }
 
 export async function sendTokenPayout(conn, toAddress, tokenAmount) {

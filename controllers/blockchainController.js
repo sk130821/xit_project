@@ -35,13 +35,23 @@ export async function linkWallet(req, res) {
   try {
     const { walletAddress } = req.body;
 
-    if (!walletAddress || !/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+    if (!walletAddress || !/^0x[a-fA-F0-9]{40}$/i.test(walletAddress)) {
       return res.status(400).json({ error: 'Invalid wallet address' });
     }
 
-    await pool.query('UPDATE users SET wallet_address = ? WHERE id = ?', [walletAddress, req.userId]);
+    const normalized = String(walletAddress).toLowerCase();
 
-    res.json({ success: true, wallet_address: walletAddress });
+    const [taken] = await pool.query(
+      'SELECT id FROM users WHERE LOWER(wallet_address) = ? AND id <> ? LIMIT 1',
+      [normalized, req.userId]
+    );
+    if (taken.length > 0) {
+      return res.status(400).json({ error: 'This wallet is already linked to another account' });
+    }
+
+    await pool.query('UPDATE users SET wallet_address = ? WHERE id = ?', [normalized, req.userId]);
+
+    res.json({ success: true, wallet_address: normalized });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -118,6 +128,10 @@ export async function verifyAndBuy(req, res) {
       return res.status(400).json({ error: 'Select a plan: lock or flexible' });
     }
 
+    if (!/^0x[a-fA-F0-9]{64}$/.test(String(txHash).trim())) {
+      return res.status(400).json({ error: 'Invalid transaction hash' });
+    }
+
     const config = await getBlockchainConfig(conn);
     if (!isBlockchainMode(config.platformMode)) {
       return res.status(400).json({ error: 'On-chain purchase only available in testnet/real mode' });
@@ -140,21 +154,48 @@ export async function verifyAndBuy(req, res) {
     const user = users[0];
     const wasInactive = !user.is_active;
 
-    if (!user.wallet_address) {
+    const paymentAmount = tokenAmount * config.tokenPrice;
+    const { chainId, payerAddress } = await verifyBuyTransaction(
+      conn,
+      String(txHash).trim(),
+      paymentAmount,
+      user.wallet_address
+    );
+
+    // USDT payer is source of truth — sync account wallet + deliver XIT there
+    const deliverTo = payerAddress;
+    if (!deliverTo) {
       await conn.rollback();
-      return res.status(400).json({ error: 'Link your wallet before on-chain purchase' });
+      return res.status(400).json({ error: 'Could not determine paying wallet from USDT transfer' });
     }
 
-    const paymentAmount = tokenAmount * config.tokenPrice;
-    const { chainId } = await verifyBuyTransaction(conn, txHash, paymentAmount, user.wallet_address);
+    const [taken] = await conn.query(
+      'SELECT id FROM users WHERE LOWER(wallet_address) = ? AND id <> ? LIMIT 1',
+      [deliverTo, req.userId]
+    );
+    if (taken.length > 0) {
+      await conn.rollback();
+      return res.status(400).json({
+        error: 'Paying wallet is already linked to another member. Contact admin.',
+      });
+    }
+
+    if ((user.wallet_address || '').toLowerCase() !== deliverTo) {
+      await conn.query('UPDATE users SET wallet_address = ? WHERE id = ?', [deliverTo, req.userId]);
+    }
 
     let tokenPayoutTxHash = null;
     try {
-      const tokenPayout = await sendTokenPayout(conn, user.wallet_address, tokenAmount);
+      const tokenPayout = await sendTokenPayout(conn, deliverTo, tokenAmount);
       tokenPayoutTxHash = tokenPayout.txHash;
     } catch (payoutErr) {
       await conn.rollback();
-      return res.status(400).json({ error: `XIT delivery failed: ${payoutErr.message}` });
+      return res.status(400).json({
+        error: `XIT delivery failed: ${payoutErr.message}. USDT was received. Use Complete purchase with this tx hash after funding payout wallet: ${txHash}`,
+        code: 'XIT_DELIVERY_FAILED',
+        txHash,
+        payerAddress: deliverTo,
+      });
     }
 
     await conn.query(
@@ -174,7 +215,7 @@ export async function verifyAndBuy(req, res) {
         'buy',
         tokenAmount,
         `Buy & Invest — ${planType} plan (${config.paymentTokenSymbol}). XIT payout: ${tokenPayoutTxHash}`,
-        txHash,
+        String(txHash).trim(),
         chainId,
         investment.investmentId,
         'confirmed',
@@ -191,8 +232,10 @@ export async function verifyAndBuy(req, res) {
       success: true,
       tokens: tokenAmount,
       referralBonus,
-      txHash,
+      txHash: String(txHash).trim(),
       tokenPayoutTxHash,
+      payerAddress: deliverTo,
+      walletSynced: (user.wallet_address || '').toLowerCase() !== deliverTo,
       investment,
       accountActivated: wasInactive,
       explorerUrl: config.blockExplorerUrl ? `${config.blockExplorerUrl}/tx/${tokenPayoutTxHash}` : null,
@@ -205,6 +248,9 @@ export async function verifyAndBuy(req, res) {
     conn.release();
   }
 }
+
+/** Alias — complete purchase from an already-paid USDT tx (no new payment) */
+export const completeBuyFromTx = verifyAndBuy;
 
 export async function getAdminBlockchainStatus(req, res) {
   try {
