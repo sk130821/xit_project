@@ -8,6 +8,31 @@ const ERC20_ABI = [
   'event Transfer(address indexed from, address indexed to, uint256 value)',
 ];
 
+/** Official USDT only — fake/scam “USDT” contracts are rejected */
+export const OFFICIAL_USDT = {
+  56: '0x55d398326f99059fF775485246999027B3197955', // BSC mainnet Binance-Peg USDT
+  97: '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd', // BSC testnet USDT (common faucet token)
+};
+
+export function resolveOfficialUsdt(chainId) {
+  const id = Number(chainId);
+  const addr = OFFICIAL_USDT[id];
+  if (!addr) {
+    throw new Error(`No official USDT configured for chain ${id}. Use BSC 56 (real) or 97 (testnet).`);
+  }
+  return addr.toLowerCase();
+}
+
+export function assertOfficialUsdt(chainId, tokenAddress) {
+  const official = resolveOfficialUsdt(chainId);
+  if (!tokenAddress || tokenAddress.toLowerCase() !== official) {
+    throw new Error(
+      `Fake or unsupported USDT rejected. Only official BEP-20 USDT is allowed: ${official}`
+    );
+  }
+  return official;
+}
+
 export async function loadAllSettings(conn) {
   const [rows] = await conn.query('SELECT setting_key, setting_value FROM settings');
   const map = {};
@@ -17,19 +42,37 @@ export async function loadAllSettings(conn) {
 
 export async function getBlockchainConfig(conn) {
   const s = await loadAllSettings(conn);
+  const chainId = parseInt(s.chain_id || '56');
+  const platformMode = s.platform_mode || 'demo';
+
+  // Always pin to official USDT for the chain (ignore fake addresses saved in admin)
+  let paymentTokenAddress = '';
+  let paymentTokenSymbol = 'USDT';
+  let paymentDecimals = 18;
+
+  if (isBlockchainMode(platformMode)) {
+    paymentTokenAddress = resolveOfficialUsdt(chainId);
+    paymentTokenSymbol = 'USDT';
+    paymentDecimals = 18;
+  }
+
   return {
-    platformMode: s.platform_mode || 'demo',
+    platformMode,
     bep20ContractAddress: s.bep20_contract_address || '',
-    paymentTokenAddress: s.payment_token_address || '',
-    paymentTokenSymbol: s.payment_token_symbol || 'BNB',
-    chainId: parseInt(s.chain_id || '97'),
-    chainName: s.chain_name || 'BSC Testnet',
-    rpcUrl: s.rpc_url || '',
-    blockExplorerUrl: s.block_explorer_url || 'https://testnet.bscscan.com',
+    paymentTokenAddress,
+    paymentTokenSymbol,
+    chainId,
+    chainName: s.chain_name || (chainId === 56 ? 'BNB Smart Chain' : 'BSC Testnet'),
+    rpcUrl: s.rpc_url || (chainId === 56
+      ? 'https://bsc-dataseed.binance.org/'
+      : 'https://data-seed-prebsc-1-s1.binance.org:8545/'),
+    blockExplorerUrl: s.block_explorer_url || (chainId === 56
+      ? 'https://bscscan.com'
+      : 'https://testnet.bscscan.com'),
     adminTreasuryWallet: s.admin_treasury_wallet || '',
     adminPayoutWallet: s.admin_payout_wallet || s.admin_treasury_wallet || '',
     tokenDecimals: parseInt(s.token_decimals || '18'),
-    paymentDecimals: parseInt(s.payment_decimals || '18'),
+    paymentDecimals,
     tokenPrice: parseFloat(s.token_price || '1'),
     tokenName: s.token_name || 'XIT Token',
     tokenSymbol: s.token_symbol || 'XIT',
@@ -72,28 +115,18 @@ export async function verifyBuyTransaction(conn, txHash, expectedPaymentAmount, 
   const [existing] = await conn.query('SELECT id FROM transactions WHERE tx_hash = ?', [txHash]);
   if (existing.length > 0) throw new Error('Transaction hash already used');
 
-  const tx = await provider.getTransaction(txHash);
-  if (!tx) throw new Error('Transaction details not found');
-
   const treasury = config.adminTreasuryWallet.toLowerCase();
   const expectedWei = ethers.parseUnits(expectedPaymentAmount.toFixed(8), config.paymentDecimals);
 
-  if (!config.paymentTokenAddress) {
-    if (tx.to?.toLowerCase() !== treasury) {
-      throw new Error('Payment was not sent to admin treasury wallet');
-    }
-    if (tx.value < expectedWei) {
-      throw new Error(`Insufficient payment. Expected ${expectedPaymentAmount}, received less`);
-    }
-    if (fromAddress && tx.from.toLowerCase() !== fromAddress.toLowerCase()) {
-      throw new Error('Transaction sender does not match connected wallet');
-    }
-  } else {
+  // Buys must be official USDT only — fake USDT contracts rejected
+  const officialUsdt = assertOfficialUsdt(config.chainId, config.paymentTokenAddress);
+
+  {
     const iface = new ethers.Interface(ERC20_ABI);
     let found = false;
 
     for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== config.paymentTokenAddress.toLowerCase()) continue;
+      if (log.address.toLowerCase() !== officialUsdt) continue;
       try {
         const parsed = iface.parseLog({ topics: log.topics, data: log.data });
         if (parsed?.name === 'Transfer') {
@@ -108,12 +141,16 @@ export async function verifyBuyTransaction(conn, txHash, expectedPaymentAmount, 
             break;
           }
         }
-      } catch {
-        // skip unparseable logs
+      } catch (err) {
+        if (err.message?.includes('connected wallet')) throw err;
       }
     }
 
-    if (!found) throw new Error('Valid payment token transfer to treasury not found');
+    if (!found) {
+      throw new Error(
+        `Valid official USDT transfer to treasury not found. Fake USDT is not accepted. Use ${officialUsdt}`
+      );
+    }
   }
 
   return { chainId: config.chainId, config };
