@@ -1,11 +1,14 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import { verifyMessage, getAddress, isAddress } from 'ethers';
 import { pool } from '../db.js';
 import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
 import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
 import { getUserOnChainXitBalance, computeBlockchainSellable } from '../services/tokenPayoutService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
+
+const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
 
 function hashResetToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -19,6 +22,39 @@ function generateReferralCode(userId) {
   const base = userId.toString(16).toUpperCase();
   const random = Math.random().toString(36).substring(2, 6).toUpperCase();
   return (base + random).substring(0, 8).padEnd(8, 'X');
+}
+
+function normalizeWallet(address) {
+  if (!address || !isAddress(address)) return null;
+  return getAddress(address).toLowerCase();
+}
+
+function usernameFromWallet(wallet) {
+  return `user_${wallet.slice(2, 6)}${wallet.slice(-4)}`.toLowerCase();
+}
+
+function publicUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    wallet_address: user.wallet_address,
+    referral_code: user.referral_code,
+    wallet_balance: Number(user.wallet_balance),
+    xit_balance: Number(user.xit_balance || 0),
+    total_earned: Number(user.total_earned),
+    total_invested: Number(user.total_invested),
+    is_active: !!user.is_active,
+  };
+}
+
+function buildLoginMessage(wallet, timestamp) {
+  return (
+    `XIT Token Login\n` +
+    `Wallet: ${wallet}\n` +
+    `Timestamp: ${timestamp}\n` +
+    `Only sign this message on xittoken.co to authenticate.`
+  );
 }
 
 async function buildReferralChain(userId, sponsorId) {
@@ -170,7 +206,7 @@ export async function login(req, res) {
     }
 
     const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
-    if (users.length === 0) {
+    if (users.length === 0 || !users[0].password) {
       return res.status(400).json({ error: 'Invalid email or password' });
     }
 
@@ -181,25 +217,150 @@ export async function login(req, res) {
     }
 
     const token = generateUserToken(user);
-
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        wallet_address: user.wallet_address,
-        referral_code: user.referral_code,
-        wallet_balance: Number(user.wallet_balance),
-        xit_balance: Number(user.xit_balance || 0),
-        total_earned: Number(user.total_earned),
-        total_invested: Number(user.total_invested),
-        is_active: !!user.is_active,
-      },
-    });
+    res.json({ token, user: publicUser(user) });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Server error during login' });
+  }
+}
+
+/** GET /auth/wallet-status?address=0x... — check if wallet already registered */
+export async function walletStatus(req, res) {
+  try {
+    const wallet = normalizeWallet(req.query.address || req.body?.address);
+    if (!wallet) {
+      return res.status(400).json({ error: 'Valid wallet address is required' });
+    }
+
+    const [users] = await pool.query(
+      'SELECT id, username, referral_code, is_active FROM users WHERE LOWER(wallet_address) = ? LIMIT 1',
+      [wallet]
+    );
+
+    if (users.length === 0) {
+      return res.json({ registered: false, needsReferral: true, wallet });
+    }
+
+    return res.json({
+      registered: true,
+      needsReferral: false,
+      wallet,
+      username: users[0].username,
+    });
+  } catch (err) {
+    console.error('Wallet status error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+}
+
+/**
+ * POST /auth/wallet-login
+ * body: { address, signature, timestamp, referralCode? }
+ * - Existing wallet → JWT
+ * - New wallet → requires valid referralCode (or ?ref from client)
+ */
+export async function walletLogin(req, res) {
+  try {
+    const { address, signature, timestamp, referralCode } = req.body || {};
+    const wallet = normalizeWallet(address);
+
+    if (!wallet) {
+      return res.status(400).json({ error: 'Valid wallet address is required' });
+    }
+    if (!signature || timestamp == null) {
+      return res.status(400).json({ error: 'Signature and timestamp are required' });
+    }
+
+    const ts = Number(timestamp);
+    if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > WALLET_LOGIN_MAX_AGE_MS) {
+      return res.status(400).json({ error: 'Login message expired. Please sign again.' });
+    }
+
+    const message = buildLoginMessage(wallet, ts);
+    let recovered;
+    try {
+      recovered = verifyMessage(message, signature);
+    } catch {
+      return res.status(400).json({ error: 'Invalid signature' });
+    }
+
+    if (normalizeWallet(recovered) !== wallet) {
+      return res.status(400).json({ error: 'Signature does not match wallet' });
+    }
+
+    const [existing] = await pool.query(
+      'SELECT * FROM users WHERE LOWER(wallet_address) = ? LIMIT 1',
+      [wallet]
+    );
+
+    if (existing.length > 0) {
+      const user = existing[0];
+      const token = generateUserToken(user);
+      return res.json({
+        token,
+        isNew: false,
+        user: publicUser(user),
+      });
+    }
+
+    // New member — sponsor required
+    const code = (referralCode || '').toString().trim().toUpperCase();
+    if (!code) {
+      return res.status(400).json({
+        error: 'Sponsor referral code is required for first-time wallet connect',
+        code: 'NEEDS_REFERRAL',
+        needsReferral: true,
+      });
+    }
+
+    const [sponsor] = await pool.query(
+      'SELECT id, username, is_active FROM users WHERE referral_code = ?',
+      [code]
+    );
+
+    if (sponsor.length === 0) {
+      return res.status(400).json({ error: 'Invalid referral code. Please check and try again.' });
+    }
+    if (!sponsor[0].is_active) {
+      return res.status(400).json({
+        error: 'This sponsor account is not activated yet. Please use an active member\'s referral code.',
+      });
+    }
+
+    const sponsorId = sponsor[0].id;
+    const config = await getBlockchainConfig(pool);
+    let walletBalance = 0;
+    if (config.platformMode === 'demo') {
+      walletBalance = parseFloat(await getSetting(pool, 'demo_signup_usdt', '1000'));
+    }
+
+    const username = usernameFromWallet(wallet);
+    const [result] = await pool.query(
+      `INSERT INTO users (username, email, password, sponsor_id, referral_code, wallet_address, wallet_balance, is_active)
+       VALUES (?, NULL, NULL, ?, 'TEMP', ?, ?, 0)`,
+      [username, sponsorId, wallet, walletBalance]
+    );
+
+    const userId = result.insertId;
+    const newCode = generateReferralCode(userId);
+    await pool.query('UPDATE users SET referral_code = ? WHERE id = ?', [newCode, userId]);
+    await buildReferralChain(userId, sponsorId);
+
+    const [users] = await pool.query('SELECT * FROM users WHERE id = ?', [userId]);
+    const user = users[0];
+    const token = generateUserToken(user);
+
+    return res.json({
+      token,
+      isNew: true,
+      user: publicUser(user),
+    });
+  } catch (err) {
+    console.error('Wallet login error:', err);
+    if (err?.code === 'ER_DUP_ENTRY') {
+      return res.status(400).json({ error: 'This wallet is already registered' });
+    }
+    res.status(500).json({ error: 'Server error during wallet login' });
   }
 }
 
@@ -308,6 +469,9 @@ export async function changePassword(req, res) {
 
     const [users] = await pool.query('SELECT password FROM users WHERE id = ?', [req.userId]);
     if (users.length === 0) return res.status(404).json({ error: 'User not found' });
+    if (!users[0].password) {
+      return res.status(400).json({ error: 'Wallet accounts do not use a password. Use Connect Wallet to sign in.' });
+    }
 
     const valid = await bcrypt.compare(currentPassword, users[0].password);
     if (!valid) return res.status(400).json({ error: 'Current password is incorrect' });

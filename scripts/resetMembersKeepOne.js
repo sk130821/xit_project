@@ -49,11 +49,16 @@ async function resetMembersKeepOne() {
     await connection.query('DELETE FROM payout_runs');
 
     await connection.query('UPDATE users SET sponsor_id = NULL WHERE id = ?', [keeperId]);
-    await connection.query('DELETE FROM referral_relations WHERE user_id = ? OR upline_id = ?', [keeperId, keeperId]);
 
-    // Fresh start for keeper too — remove plans, income history, reset balances
-    await connection.query('DELETE FROM transactions WHERE user_id = ?', [keeperId]);
-    await connection.query('DELETE FROM investments WHERE user_id = ?', [keeperId]);
+    // Full wipe — do not rely on FK CASCADE (often missing on dumped prod DBs)
+    await connection.query('DELETE FROM transactions');
+    await connection.query('DELETE FROM investments');
+    await connection.query('DELETE FROM referral_relations');
+    try {
+      await connection.query('DELETE FROM password_reset_tokens');
+    } catch {
+      /* optional */
+    }
 
     const demoUsdt = parseFloat(process.env.KEEP_USER_USDT || process.env.SEED_USER_BALANCE || '1000');
     await connection.query(

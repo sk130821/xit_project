@@ -1,11 +1,23 @@
 import { Router } from 'express';
-import { signup, login, getMe, changePassword, verifyReferralCode, forgotPassword, resetPassword } from '../controllers/authController.js';
+import {
+  signup,
+  login,
+  walletLogin,
+  walletStatus,
+  getMe,
+  changePassword,
+  verifyReferralCode,
+  forgotPassword,
+  resetPassword,
+} from '../controllers/authController.js';
 import { userAuthMiddleware } from '../middleware/auth.js';
 
 const router = Router();
 
 router.post('/signup', signup);
 router.post('/login', login);
+router.get('/wallet-status', walletStatus);
+router.post('/wallet-login', walletLogin);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password', resetPassword);
 router.get('/verify-referral', verifyReferralCode);
