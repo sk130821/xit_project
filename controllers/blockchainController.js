@@ -1,5 +1,12 @@
 import { pool } from '../db.js';
-import { getBlockchainConfig, isBlockchainMode, verifyBuyTransaction, sendTokenPayout, getTreasuryTokenBalance } from '../services/blockchainService.js';
+import {
+  getBlockchainConfig,
+  isBlockchainMode,
+  verifyBuyTransaction,
+  sendTokenPayout,
+  getTreasuryTokenBalance,
+  getAdminWalletBalances,
+} from '../services/blockchainService.js';
 import { getSetting, distributeReferralBonus } from '../services/incomeService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
 import { getUserOnChainXitBalance, computeBlockchainSellable } from '../services/tokenPayoutService.js';
@@ -205,11 +212,13 @@ export async function getAdminBlockchainStatus(req, res) {
     try {
       const config = await getBlockchainConfig(conn);
       const onChainBalance = await getTreasuryTokenBalance(conn);
+      const adminBalances = await getAdminWalletBalances(conn);
       const hasPrivateKey = !!process.env.ADMIN_PRIVATE_KEY;
 
       res.json({
         ...config,
         onChainBalance,
+        adminBalances,
         hasPrivateKey,
         payoutWallet: config.adminPayoutWallet || config.adminTreasuryWallet,
       });
@@ -217,6 +226,7 @@ export async function getAdminBlockchainStatus(req, res) {
       conn.release();
     }
   } catch (err) {
+    console.error('Admin blockchain status error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 }

@@ -281,3 +281,62 @@ export async function getWalletTokenBalance(conn, walletAddress) {
     return null;
   }
 }
+
+export async function getWalletNativeBalance(conn, walletAddress) {
+  if (!walletAddress) return null;
+  const config = await getBlockchainConfig(conn);
+  try {
+    const provider = getProvider(config.rpcUrl);
+    const balance = await provider.getBalance(walletAddress);
+    return ethers.formatEther(balance);
+  } catch {
+    return null;
+  }
+}
+
+export async function getWalletPaymentTokenBalance(conn, walletAddress) {
+  if (!walletAddress) return null;
+  const config = await getBlockchainConfig(conn);
+  if (!config.paymentTokenAddress) return null;
+  try {
+    const provider = getProvider(config.rpcUrl);
+    const contract = new ethers.Contract(config.paymentTokenAddress, ERC20_ABI, provider);
+    const balance = await contract.balanceOf(walletAddress);
+    return ethers.formatUnits(balance, config.paymentDecimals);
+  } catch {
+    return null;
+  }
+}
+
+/** Full admin wallet snapshot: XIT + USDT + BNB for payout & treasury */
+export async function getAdminWalletBalances(conn) {
+  const config = await getBlockchainConfig(conn);
+  const payout = (config.adminPayoutWallet || config.adminTreasuryWallet || '').trim();
+  const treasury = (config.adminTreasuryWallet || '').trim();
+  const sameWallet = payout && treasury && payout.toLowerCase() === treasury.toLowerCase();
+
+  async function snapshot(address) {
+    if (!address) {
+      return { address: null, xit: null, usdt: null, bnb: null };
+    }
+    const [xit, usdt, bnb] = await Promise.all([
+      getWalletTokenBalance(conn, address),
+      getWalletPaymentTokenBalance(conn, address),
+      getWalletNativeBalance(conn, address),
+    ]);
+    return { address, xit, usdt, bnb };
+  }
+
+  const payoutBalances = await snapshot(payout);
+  const treasuryBalances = sameWallet ? null : await snapshot(treasury);
+
+  return {
+    chainId: config.chainId,
+    chainName: config.chainName,
+    tokenSymbol: config.tokenSymbol || 'XIT',
+    paymentSymbol: config.paymentTokenSymbol || 'USDT',
+    sameWallet,
+    payout: payoutBalances,
+    treasury: treasuryBalances || payoutBalances,
+  };
+}
