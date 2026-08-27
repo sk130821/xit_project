@@ -10,9 +10,12 @@ const ERC20_ABI = [
 
 /** Official USDT only — fake/scam “USDT” contracts are rejected */
 export const OFFICIAL_USDT = {
-  56: '0x55d398326f99059fF775485246999027B3197955', // BSC mainnet Binance-Peg USDT
-  97: '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd', // BSC testnet USDT (common faucet token)
+  56: '0x55d398326f99059fF775485246999027B3197955', // BSC mainnet Tether USDT (BEP-20)
+  97: '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd', // BSC testnet USDT
 };
+
+/** Client XIT token on BSC mainnet */
+export const XIT_BEP20_MAINNET = '0x5bd95D6605cE909D6455D487BEaAD10d3f8F7A17';
 
 export function resolveOfficialUsdt(chainId) {
   const id = Number(chainId);
@@ -45,7 +48,7 @@ export async function getBlockchainConfig(conn) {
   const chainId = parseInt(s.chain_id || '56');
   const platformMode = s.platform_mode || 'demo';
 
-  // Always pin to official USDT for the chain (ignore fake addresses saved in admin)
+  // Always pin to official Tether USDT for the chain (ignore fake addresses)
   let paymentTokenAddress = '';
   let paymentTokenSymbol = 'USDT';
   let paymentDecimals = 18;
@@ -56,9 +59,15 @@ export async function getBlockchainConfig(conn) {
     paymentDecimals = 18;
   }
 
+  // XIT contract: use DB value; if empty on mainnet, pin client contract
+  let bep20ContractAddress = (s.bep20_contract_address || '').trim();
+  if (isBlockchainMode(platformMode) && chainId === 56 && !bep20ContractAddress) {
+    bep20ContractAddress = XIT_BEP20_MAINNET;
+  }
+
   return {
     platformMode,
-    bep20ContractAddress: s.bep20_contract_address || '',
+    bep20ContractAddress,
     paymentTokenAddress,
     paymentTokenSymbol,
     chainId,
@@ -73,7 +82,7 @@ export async function getBlockchainConfig(conn) {
     adminPayoutWallet: s.admin_payout_wallet || s.admin_treasury_wallet || '',
     tokenDecimals: parseInt(s.token_decimals || '18'),
     paymentDecimals,
-    tokenPrice: parseFloat(s.token_price || '1'),
+    tokenPrice: parseFloat(s.token_price || '0.06'),
     tokenName: s.token_name || 'XIT Token',
     tokenSymbol: s.token_symbol || 'XIT',
     liquidityAmount: s.liquidity_amount || '0',
