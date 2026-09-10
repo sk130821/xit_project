@@ -7,7 +7,15 @@ import {
   sendPaymentPayout,
 } from '../services/blockchainService.js';
 import { createInvestmentForUser, investmentHasIncomeEligible } from '../services/investmentService.js';
-import { creditUserXit, computeBlockchainSellable, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
+import { creditUserXit, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
+import {
+  applyLockPlanCompletionSellable,
+  computeMemberSellable,
+  getInvestmentBalanceStats,
+  investmentAllowsSell,
+} from '../services/sellBalanceService.js';
+import { runSellPreflight } from '../services/sellValidationService.js';
+import { getMinWalletXitForIncome, getUserWalletXitBalance, userMeetsMinWalletForIncome } from '../services/walletIncomeService.js';
 import { getISTDateString } from '../utils/istDate.js';
 
 const PLAN_CONFIG = {
@@ -82,6 +90,25 @@ export async function claimRoi(req, res) {
       return res.json({ success: true, completed: true, roi: 0 });
     }
 
+    const [claimUserRows] = await conn.query(
+      'SELECT id, xit_balance, wallet_address FROM users WHERE id = ?',
+      [req.userId]
+    );
+    const walletEligible = claimUserRows.length
+      ? await userMeetsMinWalletForIncome(conn, req.userId, claimUserRows[0])
+      : false;
+
+    if (!walletEligible) {
+      await conn.rollback();
+      const minWallet = await getMinWalletXitForIncome(conn);
+      const balance = claimUserRows.length
+        ? await getUserWalletXitBalance(conn, req.userId, claimUserRows[0])
+        : 0;
+      return res.status(400).json({
+        error: `Maintain at least ${minWallet} XIT in your wallet to receive ROI. Current balance: ${balance.toFixed(2)} XIT`,
+      });
+    }
+
     const payout = await creditUserXit(conn, req.userId, totalClaimable);
 
     const newRoiReceived = Number(inv.roi_received) + totalClaimable;
@@ -91,6 +118,8 @@ export async function claimRoi(req, res) {
       'UPDATE investments SET roi_received = ?, last_roi_date = CURRENT_DATE(), status = ? WHERE id = ?',
       [newRoiReceived, newStatus, investmentId]
     );
+
+    await applyLockPlanCompletionSellable(conn, investmentId, inv.plan_type, newStatus, newRoiReceived);
 
     await conn.query(
       'INSERT INTO transactions (user_id, type, amount, description, investment_id, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
@@ -146,6 +175,30 @@ export async function listInvestments(req, res) {
   }
 }
 
+export async function sellPreflight(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    const { tokenAmount, investmentId } = req.body;
+
+    const result = await runSellPreflight(conn, req.userId, tokenAmount, investmentId);
+
+    res.json({
+      ok: true,
+      mode: result.mode,
+      usdtPayout: result.usdtPayout,
+      paymentSymbol: result.paymentSymbol,
+      adminCharge: result.adminCharge,
+      netXit: result.netXit,
+      adminWallet: result.adminWallet || null,
+      minUserBnb: result.minUserBnb || null,
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message || 'Sell pre-check failed' });
+  } finally {
+    conn.release();
+  }
+}
+
 export async function sellTokens(req, res) {
   const conn = await pool.getConnection();
   try {
@@ -170,15 +223,8 @@ export async function sellTokens(req, res) {
     }
 
     const xitBalance = Number(user.xit_balance || 0);
-    const [invStats] = await conn.query(
-      `SELECT
-        COALESCE(SUM(sellable_amount), 0) AS plan_sellable,
-        COALESCE(SUM(locked_amount), 0) AS plan_locked
-       FROM investments WHERE user_id = ? AND status = 'active'`,
-      [req.userId]
-    );
-    const sellableFromInvestments = Number(invStats[0].plan_sellable);
-    const planLocked = Number(invStats[0].plan_locked);
+    const balanceStats = await getInvestmentBalanceStats(conn, req.userId);
+    const { planSellable: sellableFromInvestments, planLocked, lockRoiHeld } = balanceStats;
 
     const config = await getBlockchainConfig(conn);
     const chainMode = isBlockchainMode(config.platformMode);
@@ -198,9 +244,9 @@ export async function sellTokens(req, res) {
         return res.status(404).json({ error: 'Investment not found' });
       }
       const targetInv = targetInvs[0];
-      if (targetInv.status !== 'active') {
+      if (!investmentAllowsSell(targetInv)) {
         await conn.rollback();
-        return res.status(400).json({ error: 'Investment is not active' });
+        return res.status(400).json({ error: 'This investment has no sellable tokens' });
       }
       const invSellable = Number(targetInv.sellable_amount);
       if (invSellable <= 0) {
@@ -233,7 +279,13 @@ export async function sellTokens(req, res) {
       }
 
       const onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
-      totalSellable = computeBlockchainSellable(onChainBalance, sellableFromInvestments, planLocked);
+      const sellableView = computeMemberSellable(
+        onChainBalance,
+        sellableFromInvestments,
+        planLocked,
+        lockRoiHeld
+      );
+      totalSellable = sellableView.totalSellable;
 
       if (tokenAmount > totalSellable) {
         await conn.rollback();
@@ -245,18 +297,23 @@ export async function sellTokens(req, res) {
         return res.status(400).json({ error: 'Insufficient XIT balance in your wallet' });
       }
 
-      const incomeSellable = Math.max(0, onChainBalance - sellableFromInvestments - planLocked);
-      amountFromXitBalance = Math.min(tokenAmount, incomeSellable);
+      amountFromXitBalance = Math.min(tokenAmount, sellableView.incomeSellable);
       amountFromInvestments = tokenAmount - amountFromXitBalance;
     } else {
-      totalSellable = xitBalance + sellableFromInvestments;
+      const sellableView = computeMemberSellable(
+        xitBalance,
+        sellableFromInvestments,
+        planLocked,
+        lockRoiHeld
+      );
+      totalSellable = sellableView.totalSellable;
 
       if (tokenAmount > totalSellable) {
         await conn.rollback();
         return res.status(400).json({ error: 'Insufficient sellable XIT tokens' });
       }
 
-      amountFromXitBalance = Math.min(tokenAmount, xitBalance);
+      amountFromXitBalance = Math.min(tokenAmount, sellableView.incomeSellable);
       amountFromInvestments = tokenAmount - amountFromXitBalance;
     }
 
@@ -279,6 +336,8 @@ export async function sellTokens(req, res) {
       }
 
       try {
+        await runSellPreflight(conn, req.userId, tokenAmount, investmentId);
+
         const verified = await verifySellTokenTransfer(conn, txHash, tokenAmount, user.wallet_address);
         tokenReturnTxHash = txHash;
         payoutChainId = verified.chainId;
@@ -307,8 +366,11 @@ export async function sellTokens(req, res) {
 
         while (remainder > 0) {
           const [invs] = await conn.query(
-            'SELECT id, sellable_amount FROM investments WHERE user_id = ? AND status = ? AND sellable_amount > 0 ORDER BY created_at LIMIT 1 FOR UPDATE',
-            [req.userId, 'active']
+            `SELECT id, sellable_amount FROM investments
+             WHERE user_id = ? AND sellable_amount > 0
+               AND (status = 'active' OR (status = 'completed' AND plan_type = 'lock'))
+             ORDER BY created_at LIMIT 1 FOR UPDATE`,
+            [req.userId]
           );
 
           if (invs.length === 0) break;

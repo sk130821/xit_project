@@ -254,8 +254,84 @@ export async function verifySellTokenTransfer(conn, txHash, expectedTokenAmount,
   return { chainId: config.chainId, config };
 }
 
+/** Minimum BNB admin wallet must hold for gas on sell payout */
+export const MIN_ADMIN_BNB_GAS = 0.001;
+
+/** Minimum BNB user wallet must hold to send XIT on sell */
+export const MIN_USER_BNB_GAS = 0.0003;
+
+/** Verify admin can pay user before any on-chain sell proceeds. */
+export async function validateAdminSellPayout(conn, paymentAmount) {
+  const config = await getBlockchainConfig(conn);
+
+  if (!config.bep20ContractAddress) {
+    throw new Error('XIT contract not configured. Contact admin.');
+  }
+
+  const adminWallet = config.adminPayoutWallet || config.adminTreasuryWallet;
+  if (!adminWallet) {
+    throw new Error('Admin payout wallet not configured. Contact admin.');
+  }
+
+  const privateKey = process.env.ADMIN_PRIVATE_KEY;
+  const provider = getProvider(config.rpcUrl);
+  const wallet = getWallet(privateKey, provider);
+  const amountWei = ethers.parseUnits(paymentAmount.toFixed(8), config.paymentDecimals);
+  const minGasWei = ethers.parseEther(String(MIN_ADMIN_BNB_GAS));
+  const bnbBalance = await provider.getBalance(wallet.address);
+  const paymentSymbol = config.paymentTokenSymbol || 'USDT';
+
+  if (bnbBalance < minGasWei) {
+    throw new Error(
+      `Admin wallet has insufficient BNB for gas (need at least ${MIN_ADMIN_BNB_GAS} BNB). Contact admin.`
+    );
+  }
+
+  if (!config.paymentTokenAddress) {
+    if (bnbBalance < amountWei + minGasWei) {
+      throw new Error(
+        `Admin wallet has insufficient BNB for payout (need ${paymentAmount.toFixed(4)} BNB + gas). Contact admin.`
+      );
+    }
+    return { ok: true, paymentSymbol: 'BNB' };
+  }
+
+  const contract = new ethers.Contract(config.paymentTokenAddress, ERC20_ABI, provider);
+  const paymentBalance = await contract.balanceOf(wallet.address);
+  if (paymentBalance < amountWei) {
+    const have = parseFloat(ethers.formatUnits(paymentBalance, config.paymentDecimals));
+    throw new Error(
+      `Admin wallet has insufficient ${paymentSymbol} for payout. Need ${paymentAmount.toFixed(4)}, have ${have.toFixed(4)}. Contact admin.`
+    );
+  }
+
+  return { ok: true, paymentSymbol };
+}
+
+/** Verify user wallet has enough BNB to pay gas for XIT transfer. */
+export async function validateUserSellGas(conn, walletAddress) {
+  if (!walletAddress) {
+    throw new Error('Link your MetaMask wallet before selling in blockchain mode');
+  }
+
+  const config = await getBlockchainConfig(conn);
+  const provider = getProvider(config.rpcUrl);
+  const bnbBalance = await provider.getBalance(walletAddress);
+  const minGasWei = ethers.parseEther(String(MIN_USER_BNB_GAS));
+
+  if (bnbBalance < minGasWei) {
+    throw new Error(
+      `Insufficient BNB in your wallet for gas fees. Need at least ${MIN_USER_BNB_GAS} BNB to send XIT.`
+    );
+  }
+
+  return { ok: true };
+}
+
 /** Send BNB or payment token back to user after sell. */
 export async function sendPaymentPayout(conn, toAddress, paymentAmount) {
+  await validateAdminSellPayout(conn, paymentAmount);
+
   const config = await getBlockchainConfig(conn);
   const privateKey = process.env.ADMIN_PRIVATE_KEY;
   const provider = getProvider(config.rpcUrl);
@@ -263,10 +339,6 @@ export async function sendPaymentPayout(conn, toAddress, paymentAmount) {
   const amountWei = ethers.parseUnits(paymentAmount.toFixed(8), config.paymentDecimals);
 
   if (!config.paymentTokenAddress) {
-    const balance = await provider.getBalance(wallet.address);
-    if (balance < amountWei) {
-      throw new Error('Treasury has insufficient BNB for sell payout');
-    }
     const tx = await wallet.sendTransaction({ to: toAddress, value: amountWei });
     const receipt = await tx.wait();
     return { txHash: receipt.hash, chainId: config.chainId };

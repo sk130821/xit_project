@@ -9,7 +9,8 @@ import {
 } from '../services/blockchainService.js';
 import { getSetting, distributeReferralBonus } from '../services/incomeService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
-import { getUserOnChainXitBalance, computeBlockchainSellable } from '../services/tokenPayoutService.js';
+import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
+import { computeMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
 
 export async function getConfig(req, res) {
   try {
@@ -84,19 +85,9 @@ export async function getMemberWalletBalance(req, res) {
       });
     }
 
-    const [invStats] = await conn.query(
-      `SELECT
-        COALESCE(SUM(sellable_amount), 0) AS plan_sellable,
-        COALESCE(SUM(locked_amount), 0) AS plan_locked
-       FROM investments WHERE user_id = ? AND status = 'active'`,
-      [req.userId]
-    );
-
-    const planSellable = Number(invStats[0].plan_sellable);
-    const planLocked = Number(invStats[0].plan_locked);
+    const { planSellable, planLocked, lockRoiHeld } = await getInvestmentBalanceStats(conn, req.userId);
     const onChainXitBalance = await getUserOnChainXitBalance(conn, walletAddress);
-    const incomeBalance = Math.max(0, onChainXitBalance - planSellable - planLocked);
-    const totalSellable = computeBlockchainSellable(onChainXitBalance, planSellable, planLocked);
+    const sellableView = computeMemberSellable(onChainXitBalance, planSellable, planLocked, lockRoiHeld);
 
     res.json({
       chainMode: true,
@@ -104,8 +95,9 @@ export async function getMemberWalletBalance(req, res) {
       onChainXitBalance,
       planSellable,
       planLocked,
-      incomeBalance,
-      totalSellable,
+      lockRoiHeld,
+      incomeBalance: sellableView.incomeSellable,
+      totalSellable: sellableView.totalSellable,
     });
   } catch (err) {
     console.error('Wallet balance error:', err);

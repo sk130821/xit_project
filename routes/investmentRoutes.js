@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createInvestment, claimRoi, listInvestments, sellTokens } from '../controllers/investmentController.js';
+import { createInvestment, claimRoi, listInvestments, sellPreflight, sellTokens } from '../controllers/investmentController.js';
 import { userAuthMiddleware } from '../middleware/auth.js';
 
 const router = Router();
@@ -7,6 +7,7 @@ const router = Router();
 router.post('/create', userAuthMiddleware, createInvestment);
 router.post('/claim-roi', userAuthMiddleware, claimRoi);
 router.get('/list', userAuthMiddleware, listInvestments);
+router.post('/sell-preflight', userAuthMiddleware, sellPreflight);
 router.post('/sell', userAuthMiddleware, sellTokens);
 
 export default router;

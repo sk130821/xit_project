@@ -5,8 +5,14 @@ import {
   previewRewardBonus,
 } from './incomeService.js';
 import { creditUserXit, toPositiveInt } from './tokenPayoutService.js';
+import {
+  getMinWalletXitForIncome,
+  getUserWalletXitBalance,
+  userMeetsMinWalletForIncome,
+} from './walletIncomeService.js';
 import { getBlockchainConfig, isBlockchainMode } from './blockchainService.js';
 import { investmentHasIncomeEligible } from './investmentService.js';
+import { applyLockPlanCompletionSellable } from './sellBalanceService.js';
 import { getISTDateString } from '../utils/istDate.js';
 
 /** Bump when uploading — must appear in cron.log or server is still on old file */
@@ -54,6 +60,14 @@ async function previewLevelBonus(conn, earnerId, roiAmount) {
 
   let total = 0;
   for (const upline of uplines) {
+    const [uplineRows] = await conn.query(
+      'SELECT id, xit_balance, wallet_address FROM users WHERE id = ? LIMIT 1',
+      [upline.upline_id]
+    );
+    if (!uplineRows.length) continue;
+    const walletOk = await userMeetsMinWalletForIncome(conn, upline.upline_id, uplineRows[0]);
+    if (!walletOk) continue;
+
     total += (roiAmount * Number(upline.percentage)) / 100;
   }
   return total;
@@ -82,6 +96,15 @@ export async function previewPayout(asOfDate = null) {
     for (const inv of investments) {
       const calc = calculateInvestmentRoi(inv, asOfDate);
       if (!calc || calc.roi <= 0) continue;
+
+      const [ownerRows] = await conn.query(
+        'SELECT id, xit_balance, wallet_address FROM users WHERE id = ? LIMIT 1',
+        [inv.user_id]
+      );
+      const walletOk = ownerRows.length
+        ? await userMeetsMinWalletForIncome(conn, inv.user_id, ownerRows[0])
+        : false;
+      if (!walletOk) continue;
 
       eligibleCount++;
       const levelBonus = investmentHasIncomeEligible(inv)
@@ -159,6 +182,37 @@ async function processInvestmentRoi(conn, inv, owner, description = 'Daily ROI p
     return { investmentId, roi: 0, levelBonus: 0, rewardBonus: 0, completed: calc.completed };
   }
 
+  const [ownerWalletRows] = await conn.query(
+    `SELECT xit_balance, wallet_address FROM users WHERE id = ${ownerUserId} LIMIT 1`
+  );
+  const ownerWalletUser = ownerWalletRows[0] || null;
+  const walletEligible = ownerWalletUser
+    ? await userMeetsMinWalletForIncome(conn, ownerUserId, ownerWalletUser)
+    : false;
+
+  if (!walletEligible) {
+    const minWallet = await getMinWalletXitForIncome(conn);
+    const balance = ownerWalletUser
+      ? await getUserWalletXitBalance(conn, ownerUserId, ownerWalletUser)
+      : 0;
+    console.warn(
+      `[Payout] skip ROI inv=${investmentId} owner=${ownerUserId}(${ownerUsername}) ` +
+        `wallet=${balance.toFixed(4)} XIT below min ${minWallet}`
+    );
+    return {
+      investmentId,
+      userId: ownerUserId,
+      username: ownerUsername,
+      roi: 0,
+      levelBonus: 0,
+      rewardBonus: 0,
+      completed: false,
+      skipped: 'min_wallet',
+      walletBalance: balance,
+      minWalletRequired: minWallet,
+    };
+  }
+
   const totalClaimable = calc.roi;
   const payoutDate = asOfDate || null;
   const createdAt = txCreatedAt(payoutDate);
@@ -194,6 +248,14 @@ async function processInvestmentRoi(conn, inv, owner, description = 'Daily ROI p
   await conn.query(
     `UPDATE investments SET roi_received = ?, last_roi_date = ?, status = ? WHERE id = ${investmentId} AND user_id = ${ownerUserId}`,
     [newRoiReceived, lastRoiDate, newStatus]
+  );
+
+  await applyLockPlanCompletionSellable(
+    conn,
+    investmentId,
+    inv.plan_type,
+    newStatus,
+    newRoiReceived
   );
 
   const roiDescription = chainMode

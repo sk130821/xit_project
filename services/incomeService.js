@@ -1,4 +1,5 @@
 import { creditUserXit } from './tokenPayoutService.js';
+import { getMinWalletXitForIncome, userMeetsMinWalletForIncome } from './walletIncomeService.js';
 
 export async function getSetting(conn, key, fallback) {
   const [rows] = await conn.query('SELECT setting_value FROM settings WHERE setting_key = ?', [key]);
@@ -76,9 +77,26 @@ export async function distributeLevelBonus(conn, earnerId, roiAmount, investment
 
   let totalBonus = 0;
 
+  const minWallet = await getMinWalletXitForIncome(conn);
+
   for (const upline of uplines) {
     const bonus = (roiAmount * Number(upline.percentage)) / 100;
     if (bonus <= 0) continue;
+
+    const [uplineRows] = await conn.query(
+      'SELECT id, xit_balance, wallet_address FROM users WHERE id = ? LIMIT 1',
+      [upline.upline_id]
+    );
+    if (!uplineRows.length) continue;
+
+    const walletOk = await userMeetsMinWalletForIncome(conn, upline.upline_id, uplineRows[0]);
+    if (!walletOk) {
+      console.warn(
+        `[LevelBonus] skipped upline=${upline.upline_id} level=${upline.level} ` +
+          `wallet below ${minWallet} XIT minimum`
+      );
+      continue;
+    }
 
     const payout = await creditUserXit(conn, upline.upline_id, bonus, { skipIfNoWallet: true });
     if (!payout.credited) {

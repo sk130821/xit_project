@@ -150,6 +150,7 @@ INSERT INTO settings (setting_key, setting_value, description) VALUES
   ('min_purchase', '1', 'Minimum token purchase amount'),
   ('min_investment', '1', 'Minimum investment amount'),
   ('flexible_min_tokens', '100', 'Minimum tokens for Flexible plan and MLM income eligibility'),
+  ('min_wallet_xit_for_income', '100', 'Minimum XIT in member wallet to receive ROI and level income'),
   ('demo_signup_usdt', '1000', 'Demo mode: USDT wallet for new signups and auto top-up'),
   ('admin_charge_percent', '10', 'Admin charge percentage on token sales'),
   ('bep20_contract_address', '', 'XIT BEP-20 token contract address'),

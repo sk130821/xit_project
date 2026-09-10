@@ -5,7 +5,8 @@ import { pool } from '../db.js';
 import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
 import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
-import { getUserOnChainXitBalance, computeBlockchainSellable } from '../services/tokenPayoutService.js';
+import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
+import { computeMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
 
 const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
@@ -494,32 +495,39 @@ export async function getMe(req, res) {
 
     const user = users[0];
 
-    const [invStats] = await pool.query(
-      `SELECT
-        COALESCE(SUM(sellable_amount), 0) AS plan_sellable,
-        COALESCE(SUM(locked_amount), 0) AS plan_locked
-       FROM investments WHERE user_id = ? AND status = 'active'`,
-      [req.userId]
-    );
-
-    const planSellable = Number(invStats[0].plan_sellable);
-    const planLocked = Number(invStats[0].plan_locked);
-
     const conn = await pool.getConnection();
     let platformMode = 'demo';
     let onChainXitBalance = null;
     let totalSellable = null;
+    let planSellable = 0;
+    let planLocked = 0;
+    let lockRoiHeld = 0;
 
     try {
+      const balanceStats = await getInvestmentBalanceStats(conn, req.userId);
+      planSellable = balanceStats.planSellable;
+      planLocked = balanceStats.planLocked;
+      lockRoiHeld = balanceStats.lockRoiHeld;
+
       const config = await getBlockchainConfig(conn);
       platformMode = config.platformMode;
       const chainMode = isBlockchainMode(platformMode);
 
       if (chainMode && user.wallet_address) {
         onChainXitBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
-        totalSellable = computeBlockchainSellable(onChainXitBalance, planSellable, planLocked);
+        totalSellable = computeMemberSellable(
+          onChainXitBalance,
+          planSellable,
+          planLocked,
+          lockRoiHeld
+        ).totalSellable;
       } else if (!chainMode) {
-        totalSellable = Number(user.xit_balance || 0) + planSellable;
+        totalSellable = computeMemberSellable(
+          Number(user.xit_balance || 0),
+          planSellable,
+          planLocked,
+          lockRoiHeld
+        ).totalSellable;
       }
     } finally {
       conn.release();
@@ -540,6 +548,7 @@ export async function getMe(req, res) {
       total_purchased: Number(user.total_purchased || 0),
       plan_sellable: planSellable,
       plan_locked: planLocked,
+      lock_roi_held: lockRoiHeld,
       platform_mode: platformMode,
       on_chain_xit_balance: onChainXitBalance,
       total_sellable: totalSellable,

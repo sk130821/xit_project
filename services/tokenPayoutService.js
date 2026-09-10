@@ -130,12 +130,13 @@ export async function creditUserXit(conn, userId, amount, options = {}) {
   };
 }
 
-/** Max sellable in blockchain mode: plan sellable + ROI/bonus on wallet, capped by on-chain balance. */
-export function computeBlockchainSellable(onChainBalance, planSellable, planLocked) {
+/** @deprecated Use sellBalanceService.computeMemberSellable */
+export function computeBlockchainSellable(onChainBalance, planSellable, planLocked, lockRoiHeld = 0) {
   const balance = Number(onChainBalance) || 0;
   const sellable = Number(planSellable) || 0;
   const locked = Number(planLocked) || 0;
-  const incomeSellable = Math.max(0, balance - sellable - locked);
+  const lockHeld = Number(lockRoiHeld) || 0;
+  const incomeSellable = Math.max(0, balance - locked - lockHeld);
   return Math.min(balance, sellable + incomeSellable);
 }
 
