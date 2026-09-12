@@ -86,7 +86,8 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
       onChainBalance,
       sellableFromInvestments,
       planLocked,
-      lockRoiHeld
+      lockRoiHeld,
+      true
     );
     totalSellable = sellableView.totalSellable;
 

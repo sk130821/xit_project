@@ -131,13 +131,12 @@ export async function creditUserXit(conn, userId, amount, options = {}) {
 }
 
 /** @deprecated Use sellBalanceService.computeMemberSellable */
-export function computeBlockchainSellable(onChainBalance, planSellable, planLocked, lockRoiHeld = 0) {
+export function computeBlockchainSellable(onChainBalance, _planSellable, planLocked, lockRoiHeld = 0) {
   const balance = Number(onChainBalance) || 0;
-  const sellable = Number(planSellable) || 0;
   const locked = Number(planLocked) || 0;
   const lockHeld = Number(lockRoiHeld) || 0;
-  const incomeSellable = Math.max(0, balance - locked - lockHeld);
-  return Math.min(balance, sellable + incomeSellable);
+  const afterHold = Math.max(0, balance - locked - lockHeld);
+  return Math.round(Math.min(balance, afterHold) * 1e8) / 1e8;
 }
 
 export async function getUserOnChainXitBalance(conn, walletAddress) {

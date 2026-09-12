@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS referral_relations (
 CREATE TABLE IF NOT EXISTS investments (
   id INT AUTO_INCREMENT PRIMARY KEY,
   user_id INT NOT NULL,
-  plan_type ENUM('lock','flexible') NOT NULL,
+  plan_type ENUM('lock','flexible','flexible_lock') NOT NULL,
   token_amount DECIMAL(20,8) NOT NULL,
   total_return DECIMAL(20,8) NOT NULL,
   daily_roi_rate DECIMAL(10,8) NOT NULL,
@@ -150,7 +150,7 @@ INSERT INTO settings (setting_key, setting_value, description) VALUES
   ('min_purchase', '1', 'Minimum token purchase amount'),
   ('min_investment', '1', 'Minimum investment amount'),
   ('flexible_min_tokens', '100', 'Minimum tokens for Flexible plan and MLM income eligibility'),
-  ('min_wallet_xit_for_income', '100', 'Minimum XIT in member wallet to receive ROI and level income'),
+  ('min_wallet_xit_for_income', '100', 'Minimum XIT in member wallet to receive level and reward income (ROI always pays)'),
   ('demo_signup_usdt', '1000', 'Demo mode: USDT wallet for new signups and auto top-up'),
   ('admin_charge_percent', '10', 'Admin charge percentage on token sales'),
   ('bep20_contract_address', '', 'XIT BEP-20 token contract address'),

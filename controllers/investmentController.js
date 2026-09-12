@@ -6,7 +6,7 @@ import {
   verifySellTokenTransfer,
   sendPaymentPayout,
 } from '../services/blockchainService.js';
-import { createInvestmentForUser, investmentHasIncomeEligible } from '../services/investmentService.js';
+import { createInvestmentForUser, formatRoiDescription, investmentHasIncomeEligible } from '../services/investmentService.js';
 import { creditUserXit, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
 import {
   applyLockPlanCompletionSellable,
@@ -15,7 +15,6 @@ import {
   investmentAllowsSell,
 } from '../services/sellBalanceService.js';
 import { runSellPreflight } from '../services/sellValidationService.js';
-import { getMinWalletXitForIncome, getUserWalletXitBalance, userMeetsMinWalletForIncome } from '../services/walletIncomeService.js';
 import { getISTDateString } from '../utils/istDate.js';
 
 const PLAN_CONFIG = {
@@ -90,25 +89,6 @@ export async function claimRoi(req, res) {
       return res.json({ success: true, completed: true, roi: 0 });
     }
 
-    const [claimUserRows] = await conn.query(
-      'SELECT id, xit_balance, wallet_address FROM users WHERE id = ?',
-      [req.userId]
-    );
-    const walletEligible = claimUserRows.length
-      ? await userMeetsMinWalletForIncome(conn, req.userId, claimUserRows[0])
-      : false;
-
-    if (!walletEligible) {
-      await conn.rollback();
-      const minWallet = await getMinWalletXitForIncome(conn);
-      const balance = claimUserRows.length
-        ? await getUserWalletXitBalance(conn, req.userId, claimUserRows[0])
-        : 0;
-      return res.status(400).json({
-        error: `Maintain at least ${minWallet} XIT in your wallet to receive ROI. Current balance: ${balance.toFixed(2)} XIT`,
-      });
-    }
-
     const payout = await creditUserXit(conn, req.userId, totalClaimable);
 
     const newRoiReceived = Number(inv.roi_received) + totalClaimable;
@@ -123,7 +103,7 @@ export async function claimRoi(req, res) {
 
     await conn.query(
       'INSERT INTO transactions (user_id, type, amount, description, investment_id, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [req.userId, 'roi', totalClaimable, 'Daily ROI income', investmentId, payout.txHash, payout.chainId, payout.onChainStatus]
+      [req.userId, 'roi', totalClaimable, formatRoiDescription(inv.plan_type), investmentId, payout.txHash, payout.chainId, payout.onChainStatus]
     );
 
     const levelBonusTotal = investmentHasIncomeEligible(inv)
@@ -283,7 +263,8 @@ export async function sellTokens(req, res) {
         onChainBalance,
         sellableFromInvestments,
         planLocked,
-        lockRoiHeld
+        lockRoiHeld,
+        true
       );
       totalSellable = sellableView.totalSellable;
 
@@ -368,7 +349,7 @@ export async function sellTokens(req, res) {
           const [invs] = await conn.query(
             `SELECT id, sellable_amount FROM investments
              WHERE user_id = ? AND sellable_amount > 0
-               AND (status = 'active' OR (status = 'completed' AND plan_type = 'lock'))
+               AND (status = 'active' OR (status = 'completed' AND plan_type IN ('lock', 'flexible_lock')))
              ORDER BY created_at LIMIT 1 FOR UPDATE`,
             [req.userId]
           );

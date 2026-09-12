@@ -519,7 +519,8 @@ export async function getMe(req, res) {
           onChainXitBalance,
           planSellable,
           planLocked,
-          lockRoiHeld
+          lockRoiHeld,
+          true
         ).totalSellable;
       } else if (!chainMode) {
         totalSellable = computeMemberSellable(

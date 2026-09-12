@@ -193,7 +193,11 @@ export async function getUserDetail(req, res) {
 
     const incomeTypes = ['roi', 'referral_bonus', 'level_bonus', 'reward_bonus', 'commission'];
     const [incomeTxs] = await pool.query(
-      `SELECT * FROM transactions WHERE user_id = ? AND type IN (?) ORDER BY created_at DESC LIMIT 100`,
+      `SELECT t.*, i.plan_type AS investment_plan_type
+       FROM transactions t
+       LEFT JOIN investments i ON i.id = t.investment_id
+       WHERE t.user_id = ? AND t.type IN (?)
+       ORDER BY t.created_at DESC LIMIT 100`,
       [userId, incomeTypes]
     );
 
@@ -246,7 +250,11 @@ export async function getUserDetail(req, res) {
         sellable_amount: Number(inv.sellable_amount),
         locked_amount: Number(inv.locked_amount),
       })),
-      income: incomeTxs.map((t) => ({ ...t, amount: Number(t.amount) })),
+      income: incomeTxs.map((t) => ({
+        ...t,
+        amount: Number(t.amount),
+        plan_type: t.investment_plan_type || null,
+      })),
       team: team.map((m) => ({
         id: m.id,
         username: m.username,

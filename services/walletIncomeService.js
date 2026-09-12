@@ -2,7 +2,7 @@ import { getSetting } from './incomeService.js';
 import { getBlockchainConfig, isBlockchainMode } from './blockchainService.js';
 import { getUserOnChainXitBalance } from './tokenPayoutService.js';
 
-/** Minimum XIT in member wallet required to receive ROI or level income. */
+/** Minimum XIT in member wallet to receive level and reward income. ROI always pays. */
 export async function getMinWalletXitForIncome(conn) {
   return parseFloat(await getSetting(conn, 'min_wallet_xit_for_income', '100'));
 }

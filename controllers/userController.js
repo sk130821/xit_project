@@ -155,40 +155,45 @@ export async function getTransactions(req, res) {
 
     const incomeTypes = ['roi', 'referral_bonus', 'level_bonus', 'reward_bonus'];
     const params = [req.userId];
-    let where = 'WHERE user_id = ?';
+    let where = 'WHERE t.user_id = ?';
 
     if (category === 'income') {
-      where += ` AND type IN (${incomeTypes.map(() => '?').join(', ')})`;
+      where += ` AND t.type IN (${incomeTypes.map(() => '?').join(', ')})`;
       params.push(...incomeTypes);
     } else if (type && type !== 'all') {
-      where += ' AND type = ?';
+      where += ' AND t.type = ?';
       params.push(type);
     }
 
     if (search && String(search).trim()) {
-      where += ' AND (description LIKE ? OR type LIKE ? OR CAST(amount AS CHAR) LIKE ?)';
+      where += ' AND (t.description LIKE ? OR t.type LIKE ? OR CAST(t.amount AS CHAR) LIKE ?)';
       const term = `%${String(search).trim()}%`;
       params.push(term, term, term);
     }
 
     if (dateFrom) {
-      where += ' AND DATE(created_at) >= ?';
+      where += ' AND DATE(t.created_at) >= ?';
       params.push(dateFrom);
     }
 
     if (dateTo) {
-      where += ' AND DATE(created_at) <= ?';
+      where += ' AND DATE(t.created_at) <= ?';
       params.push(dateTo);
     }
 
     const [countRows] = await pool.query(
-      `SELECT COUNT(*) as total FROM transactions ${where}`,
+      `SELECT COUNT(*) as total FROM transactions t ${where}`,
       params
     );
     const total = Number(countRows[0].total);
 
     const [txs] = await pool.query(
-      `SELECT * FROM transactions ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      `SELECT t.*, i.plan_type AS investment_plan_type, i.token_amount AS investment_token_amount,
+              i.daily_roi_rate AS investment_daily_roi
+       FROM transactions t
+       LEFT JOIN investments i ON i.id = t.investment_id
+       ${where}
+       ORDER BY t.created_at DESC LIMIT ? OFFSET ?`,
       [...params, limitNum, offset]
     );
 
@@ -196,6 +201,9 @@ export async function getTransactions(req, res) {
       items: txs.map((t) => ({
         ...t,
         amount: Number(t.amount),
+        plan_type: t.investment_plan_type || null,
+        investment_token_amount: t.investment_token_amount != null ? Number(t.investment_token_amount) : null,
+        investment_daily_roi: t.investment_daily_roi != null ? Number(t.investment_daily_roi) : null,
       })),
       pagination: {
         page: pageNum,

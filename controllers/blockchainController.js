@@ -87,7 +87,7 @@ export async function getMemberWalletBalance(req, res) {
 
     const { planSellable, planLocked, lockRoiHeld } = await getInvestmentBalanceStats(conn, req.userId);
     const onChainXitBalance = await getUserOnChainXitBalance(conn, walletAddress);
-    const sellableView = computeMemberSellable(onChainXitBalance, planSellable, planLocked, lockRoiHeld);
+    const sellableView = computeMemberSellable(onChainXitBalance, planSellable, planLocked, lockRoiHeld, true);
 
     res.json({
       chainMode: true,

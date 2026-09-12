@@ -226,6 +226,19 @@ export async function previewRewardBonus(conn, earnerId, roiAmount) {
     if (directLegId) {
       const { currentTier, legs } = await getRewardTierQualification(conn, sponsorId);
       if (currentTier && legQualifiesForTier(legs, directLegId, currentTier)) {
+        const [sponsorRows] = await conn.query(
+          'SELECT id, xit_balance, wallet_address FROM users WHERE id = ? LIMIT 1',
+          [sponsorId]
+        );
+        if (!sponsorRows.length) {
+          currentId = sponsorId;
+          continue;
+        }
+        const walletOk = await userMeetsMinWalletForIncome(conn, sponsorId, sponsorRows[0]);
+        if (!walletOk) {
+          currentId = sponsorId;
+          continue;
+        }
         totalBonus += (roiAmount * Number(currentTier.percentage)) / 100;
       }
     }
@@ -240,6 +253,7 @@ export async function distributeRewardBonus(conn, earnerId, roiAmount, investmen
   if (roiAmount <= 0) return 0;
 
   const createdAt = payoutDate ? `${payoutDate} 00:30:00` : null;
+  const minWallet = await getMinWalletXitForIncome(conn);
   let totalPaid = 0;
   let currentId = earnerId;
   let earnerName = null;
@@ -257,6 +271,24 @@ export async function distributeRewardBonus(conn, earnerId, roiAmount, investmen
         const bonus = (roiAmount * percentage) / 100;
 
         if (bonus > 0) {
+          const [sponsorRows] = await conn.query(
+            'SELECT id, xit_balance, wallet_address FROM users WHERE id = ? LIMIT 1',
+            [sponsorId]
+          );
+          if (!sponsorRows.length) {
+            currentId = sponsorId;
+            continue;
+          }
+
+          const walletOk = await userMeetsMinWalletForIncome(conn, sponsorId, sponsorRows[0]);
+          if (!walletOk) {
+            console.warn(
+              `[RewardBonus] skipped sponsor=${sponsorId} wallet below ${minWallet} XIT minimum`
+            );
+            currentId = sponsorId;
+            continue;
+          }
+
           if (!earnerName) {
             const [earnerRow] = await conn.query('SELECT username FROM users WHERE id = ?', [earnerId]);
             earnerName = earnerRow[0]?.username || 'member';
