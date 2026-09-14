@@ -211,8 +211,11 @@ function legQualifiesForTier(legs, directLegId, tier) {
   return leg ? leg.total_business >= Number(tier.min_volume) : false;
 }
 
-export async function previewRewardBonus(conn, earnerId, roiAmount) {
+export async function previewRewardBonus(conn, earnerId, roiAmount, previewCache = null) {
   if (roiAmount <= 0) return { bonus: 0, tierName: null };
+
+  const incomePreview = previewCache?.incomePreview || null;
+  const rewardTierBySponsor = previewCache?.rewardTierBySponsor || null;
 
   let totalBonus = 0;
   let currentId = earnerId;
@@ -224,7 +227,14 @@ export async function previewRewardBonus(conn, earnerId, roiAmount) {
 
     const directLegId = await getDirectLegRoot(conn, earnerId, sponsorId);
     if (directLegId) {
-      const { currentTier, legs } = await getRewardTierQualification(conn, sponsorId);
+      let tierResult;
+      if (rewardTierBySponsor?.has(sponsorId)) {
+        tierResult = rewardTierBySponsor.get(sponsorId);
+      } else {
+        tierResult = await getRewardTierQualification(conn, sponsorId);
+        rewardTierBySponsor?.set(sponsorId, tierResult);
+      }
+      const { currentTier, legs } = tierResult;
       if (currentTier && legQualifiesForTier(legs, directLegId, currentTier)) {
         const [sponsorRows] = await conn.query(
           'SELECT id, xit_balance, wallet_address FROM users WHERE id = ? LIMIT 1',
@@ -234,7 +244,9 @@ export async function previewRewardBonus(conn, earnerId, roiAmount) {
           currentId = sponsorId;
           continue;
         }
-        const walletOk = await userMeetsMinWalletForIncome(conn, sponsorId, sponsorRows[0]);
+        const walletOk = incomePreview
+          ? await incomePreview.meetsMin(sponsorId, sponsorRows[0])
+          : await userMeetsMinWalletForIncome(conn, sponsorId, sponsorRows[0]);
         if (!walletOk) {
           currentId = sponsorId;
           continue;

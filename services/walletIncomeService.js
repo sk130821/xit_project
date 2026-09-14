@@ -46,3 +46,56 @@ export async function getWalletIncomeEligibility(conn, userId, cachedUser = null
     minRequired: min,
   };
 }
+
+/**
+ * Cached wallet checks for admin payout preview (real mode avoids thousands of duplicate RPC calls).
+ */
+export async function createWalletIncomePreviewContext(conn) {
+  const config = await getBlockchainConfig(conn);
+  const chainMode = isBlockchainMode(config.platformMode);
+  const min = parseFloat(await getSetting(conn, 'min_wallet_xit_for_income', '100'));
+  const eligibleByUserId = new Map();
+  const balanceByWallet = new Map();
+
+  async function meetsMin(userId, cachedUser = null) {
+    if (eligibleByUserId.has(userId)) {
+      return eligibleByUserId.get(userId);
+    }
+
+    let user = cachedUser;
+    if (!user) {
+      const [rows] = await conn.query(
+        'SELECT id, xit_balance, wallet_address FROM users WHERE id = ? LIMIT 1',
+        [userId]
+      );
+      if (!rows.length) {
+        eligibleByUserId.set(userId, false);
+        return false;
+      }
+      user = rows[0];
+    }
+
+    let balance;
+    if (chainMode) {
+      if (!user.wallet_address) {
+        balance = 0;
+      } else {
+        const key = String(user.wallet_address).toLowerCase();
+        if (balanceByWallet.has(key)) {
+          balance = balanceByWallet.get(key);
+        } else {
+          balance = await getUserOnChainXitBalance(conn, user.wallet_address);
+          balanceByWallet.set(key, balance);
+        }
+      }
+    } else {
+      balance = Number(user.xit_balance || 0);
+    }
+
+    const ok = balance >= min;
+    eligibleByUserId.set(userId, ok);
+    return ok;
+  }
+
+  return { meetsMin, minRequired: min, chainMode };
+}

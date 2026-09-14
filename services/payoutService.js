@@ -5,7 +5,7 @@ import {
   previewRewardBonus,
 } from './incomeService.js';
 import { creditUserXit, toPositiveInt } from './tokenPayoutService.js';
-import { userMeetsMinWalletForIncome } from './walletIncomeService.js';
+import { createWalletIncomePreviewContext } from './walletIncomeService.js';
 import { getBlockchainConfig, isBlockchainMode } from './blockchainService.js';
 import { formatRoiDescription, investmentHasIncomeEligible } from './investmentService.js';
 import { applyLockPlanCompletionSellable } from './sellBalanceService.js';
@@ -13,13 +13,13 @@ import { getISTDateString } from '../utils/istDate.js';
 import { calculateInvestmentRoiAccrual } from './roiAccrualService.js';
 
 /** Bump when uploading — must appear in cron.log or server is still on old file */
-export const PAYOUT_BUILD = '2026-09-15-roi-ist-date-normalize-v7';
+export const PAYOUT_BUILD = '2026-09-15-preview-wallet-cache-v8';
 
 export function calculateInvestmentRoi(inv, asOfDate = null) {
   return calculateInvestmentRoiAccrual(inv, asOfDate);
 }
 
-async function previewLevelBonus(conn, earnerId, roiAmount) {
+async function previewLevelBonus(conn, earnerId, roiAmount, incomePreview) {
   if (roiAmount <= 0) return 0;
 
   const [uplines] = await conn.query(
@@ -38,7 +38,7 @@ async function previewLevelBonus(conn, earnerId, roiAmount) {
       [upline.upline_id]
     );
     if (!uplineRows.length) continue;
-    const walletOk = await userMeetsMinWalletForIncome(conn, upline.upline_id, uplineRows[0]);
+    const walletOk = await incomePreview.meetsMin(upline.upline_id, uplineRows[0]);
     if (!walletOk) continue;
 
     total += (roiAmount * Number(upline.percentage)) / 100;
@@ -52,7 +52,11 @@ function txCreatedAt(payoutDate) {
 
 export async function previewPayout(asOfDate = null) {
   const conn = await pool.getConnection();
+  const previewStarted = Date.now();
   try {
+    const incomePreview = await createWalletIncomePreviewContext(conn);
+    const rewardTierBySponsor = new Map();
+
     const [investments] = await conn.query(
       `SELECT i.*, u.username
        FROM investments i
@@ -72,10 +76,10 @@ export async function previewPayout(asOfDate = null) {
 
       eligibleCount++;
       const levelBonus = investmentHasIncomeEligible(inv)
-        ? await previewLevelBonus(conn, inv.user_id, calc.roi)
+        ? await previewLevelBonus(conn, inv.user_id, calc.roi, incomePreview)
         : 0;
       const reward = investmentHasIncomeEligible(inv)
-        ? await previewRewardBonus(conn, inv.user_id, calc.roi)
+        ? await previewRewardBonus(conn, inv.user_id, calc.roi, { incomePreview, rewardTierBySponsor })
         : { bonus: 0, tierName: null };
 
       totalRoi += calc.roi;
@@ -99,6 +103,12 @@ export async function previewPayout(asOfDate = null) {
     items.sort((a, b) => b.roiAmount - a.roiAmount);
 
     const effectiveDate = asOfDate || getISTDateString();
+    const durationMs = Date.now() - previewStarted;
+
+    console.log(
+      `[Payout] preview build=${PAYOUT_BUILD} eligible=${eligibleCount} ` +
+        `chain=${incomePreview.chainMode} durationMs=${durationMs}`
+    );
 
     return {
       eligibleInvestments: eligibleCount,
@@ -110,6 +120,8 @@ export async function previewPayout(asOfDate = null) {
       items: items.slice(0, 100),
       hasMore: items.length > 100,
       payoutDate: effectiveDate,
+      previewDurationMs: durationMs,
+      payoutBuild: PAYOUT_BUILD,
     };
   } finally {
     conn.release();
