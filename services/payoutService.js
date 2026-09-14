@@ -13,7 +13,7 @@ import { getISTDateString } from '../utils/istDate.js';
 import { calculateInvestmentRoiAccrual } from './roiAccrualService.js';
 
 /** Bump when uploading — must appear in cron.log or server is still on old file */
-export const PAYOUT_BUILD = '2026-09-15-preview-wallet-cache-v8';
+export const PAYOUT_BUILD = '2026-09-15-admin-chain-send-queue-v9';
 
 export function calculateInvestmentRoi(inv, asOfDate = null) {
   return calculateInvestmentRoiAccrual(inv, asOfDate);

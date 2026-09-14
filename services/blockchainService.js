@@ -103,6 +103,80 @@ function getWallet(privateKey, provider) {
   return new ethers.Wallet(privateKey, provider);
 }
 
+/** One admin-key send at a time per Node process (ROI + level + sell payouts share the same nonce). */
+let adminChainSendTail = Promise.resolve();
+
+function runAdminChainSend(task) {
+  const run = adminChainSendTail.then(() => task(), () => task());
+  adminChainSendTail = run.then(
+    () => {},
+    () => {}
+  );
+  return run;
+}
+
+const ADMIN_SEND_MAX_ATTEMPTS = 4;
+const ADMIN_SEND_RETRY_MS = 2500;
+const ADMIN_TX_WAIT_MS = 180_000;
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isAdminSendRetriable(err) {
+  const blob = `${err?.code || ''} ${err?.message || ''} ${err?.info?.error?.message || ''}`.toLowerCase();
+  return (
+    blob.includes('replacement') ||
+    blob.includes('underpriced') ||
+    blob.includes('nonce') ||
+    blob.includes('already known')
+  );
+}
+
+async function resolveAdminGasPrice(provider, attempt) {
+  const feeData = await provider.getFeeData();
+  let gasPrice = feeData.gasPrice;
+  if (!gasPrice || gasPrice <= 0n) {
+    gasPrice = ethers.parseUnits('3', 'gwei');
+  }
+  const bumpPct = 100n + BigInt(Math.min(attempt, 3)) * 20n;
+  return (gasPrice * bumpPct) / 100n;
+}
+
+async function waitForAdminTx(tx, label) {
+  console.log(`[chain] ${label} broadcast hash=${tx.hash} nonce=${tx.nonce}`);
+  const receipt = await tx.wait(1, ADMIN_TX_WAIT_MS);
+  if (receipt.status !== 1) {
+    throw new Error(`On-chain transaction reverted (${receipt.hash})`);
+  }
+  return receipt;
+}
+
+async function sendAdminErc20Transfer(wallet, contract, toAddress, amountWei, label) {
+  const provider = wallet.provider;
+  let lastErr;
+
+  for (let attempt = 0; attempt < ADMIN_SEND_MAX_ATTEMPTS; attempt++) {
+    try {
+      const nonce = await provider.getTransactionCount(wallet.address, 'pending');
+      const gasPrice = await resolveAdminGasPrice(provider, attempt);
+      const tx = await contract.transfer(toAddress, amountWei, { nonce, gasPrice });
+      return await waitForAdminTx(tx, label);
+    } catch (err) {
+      lastErr = err;
+      const retriable = isAdminSendRetriable(err) && attempt < ADMIN_SEND_MAX_ATTEMPTS - 1;
+      console.warn(
+        `[chain] ${label} attempt=${attempt + 1}/${ADMIN_SEND_MAX_ATTEMPTS} error: ${err.message}` +
+          (retriable ? ' — retrying with higher gas' : '')
+      );
+      if (!retriable) break;
+      await sleepMs(ADMIN_SEND_RETRY_MS * (attempt + 1));
+    }
+  }
+
+  throw lastErr;
+}
+
 export async function verifyBuyTransaction(conn, txHash, expectedPaymentAmount, fromAddress = null) {
   const config = await getBlockchainConfig(conn);
 
@@ -174,25 +248,32 @@ export async function verifyBuyTransaction(conn, txHash, expectedPaymentAmount, 
 }
 
 export async function sendTokenPayout(conn, toAddress, tokenAmount) {
-  const config = await getBlockchainConfig(conn);
-  const privateKey = process.env.ADMIN_PRIVATE_KEY;
+  return runAdminChainSend(async () => {
+    const config = await getBlockchainConfig(conn);
+    const privateKey = process.env.ADMIN_PRIVATE_KEY;
 
-  if (!config.bep20ContractAddress) {
-    throw new Error('BEP-20 contract address not configured');
-  }
+    if (!config.bep20ContractAddress) {
+      throw new Error('BEP-20 contract address not configured');
+    }
 
-  const provider = getProvider(config.rpcUrl);
-  const wallet = getWallet(privateKey, provider);
-  const contract = new ethers.Contract(config.bep20ContractAddress, ERC20_ABI, wallet);
-  const amountWei = ethers.parseUnits(tokenAmount.toFixed(8), config.tokenDecimals);
+    const provider = getProvider(config.rpcUrl);
+    const wallet = getWallet(privateKey, provider);
+    const contract = new ethers.Contract(config.bep20ContractAddress, ERC20_ABI, wallet);
+    const amountWei = ethers.parseUnits(tokenAmount.toFixed(8), config.tokenDecimals);
 
-  const tx = await contract.transfer(toAddress, amountWei);
-  const receipt = await tx.wait();
+    const receipt = await sendAdminErc20Transfer(
+      wallet,
+      contract,
+      toAddress,
+      amountWei,
+      `XIT payout → ${toAddress}`
+    );
 
-  return {
-    txHash: receipt.hash,
-    chainId: config.chainId,
-  };
+    return {
+      txHash: receipt.hash,
+      chainId: config.chainId,
+    };
+  });
 }
 
 /** Verify user sent XIT tokens back to admin pool on sell. */
@@ -337,33 +418,44 @@ export async function validateUserSellGas(conn, walletAddress) {
 
 /** Send BNB or payment token back to user after sell. */
 export async function sendPaymentPayout(conn, toAddress, paymentAmount) {
-  await validateAdminSellPayout(conn, paymentAmount);
+  return runAdminChainSend(async () => {
+    await validateAdminSellPayout(conn, paymentAmount);
 
-  const config = await getBlockchainConfig(conn);
-  const privateKey = process.env.ADMIN_PRIVATE_KEY;
-  const provider = getProvider(config.rpcUrl);
-  const wallet = getWallet(privateKey, provider);
-  const amountWei = ethers.parseUnits(paymentAmount.toFixed(8), config.paymentDecimals);
+    const config = await getBlockchainConfig(conn);
+    const privateKey = process.env.ADMIN_PRIVATE_KEY;
+    const provider = getProvider(config.rpcUrl);
+    const wallet = getWallet(privateKey, provider);
+    const amountWei = ethers.parseUnits(paymentAmount.toFixed(8), config.paymentDecimals);
 
-  let sentTx = null;
-  try {
-    if (!config.paymentTokenAddress) {
-      sentTx = await wallet.sendTransaction({ to: toAddress, value: amountWei });
-    } else {
+    let sentTx = null;
+    try {
+      if (!config.paymentTokenAddress) {
+        const nonce = await provider.getTransactionCount(wallet.address, 'pending');
+        const gasPrice = await resolveAdminGasPrice(provider, 0);
+        sentTx = await wallet.sendTransaction({ to: toAddress, value: amountWei, nonce, gasPrice });
+        const receipt = await waitForAdminTx(sentTx, `BNB payout → ${toAddress}`);
+        return { txHash: receipt.hash, chainId: config.chainId };
+      }
+
       const contract = new ethers.Contract(config.paymentTokenAddress, ERC20_ABI, wallet);
-      sentTx = await contract.transfer(toAddress, amountWei);
+      const receipt = await sendAdminErc20Transfer(
+        wallet,
+        contract,
+        toAddress,
+        amountWei,
+        `${config.paymentTokenSymbol || 'USDT'} sell payout → ${toAddress}`
+      );
+      return { txHash: receipt.hash, chainId: config.chainId };
+    } catch (err) {
+      if (sentTx?.hash) {
+        const wrapped = new Error(err.message || 'Payout confirmation timed out');
+        wrapped.payoutSubmitted = true;
+        wrapped.txHash = sentTx.hash;
+        throw wrapped;
+      }
+      throw err;
     }
-    const receipt = await sentTx.wait();
-    return { txHash: receipt.hash, chainId: config.chainId };
-  } catch (err) {
-    if (sentTx?.hash) {
-      const wrapped = new Error(err.message || 'Payout confirmation timed out');
-      wrapped.payoutSubmitted = true;
-      wrapped.txHash = sentTx.hash;
-      throw wrapped;
-    }
-    throw err;
-  }
+  });
 }
 
 /** Check whether a previously broadcast payout tx confirmed (no resend). */
