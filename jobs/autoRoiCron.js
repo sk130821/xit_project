@@ -1,4 +1,5 @@
 import { runPayout } from '../services/payoutService.js';
+import { retryOpenSellPayouts } from '../services/sellOrderService.js';
 
 function msUntilMidnightIST() {
   const now = new Date();
@@ -31,6 +32,18 @@ export async function runAutoRoiJob() {
   } else {
     console.log(`[Auto ROI] No eligible investments for ${result.payoutDate}`);
   }
+
+  try {
+    const sells = await retryOpenSellPayouts();
+    if (sells.attempted > 0) {
+      console.log(`[Auto ROI] Pending sells retried: ${sells.completed} paid, ${sells.failed} still open`);
+    }
+    result.sellRetry = sells;
+  } catch (err) {
+    console.error('[Auto ROI] Pending sell retry failed:', err.message);
+    result.sellRetryError = err.message;
+  }
+
   return result;
 }
 

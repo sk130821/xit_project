@@ -64,12 +64,25 @@ async function insertInvestmentRow(conn, {
   const totalReturn = calcTotalReturn(tokenAmount, plan);
   const endDate = new Date(Date.now() + lockDays * 24 * 60 * 60 * 1000);
 
-  const [invResult] = await conn.query(
-    `INSERT INTO investments
-      (user_id, plan_type, token_amount, total_return, daily_roi_rate, sellable_amount, locked_amount, end_date, income_eligible)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [userId, planType, tokenAmount, totalReturn, plan.dailyRoi, sellable, locked, endDate, incomeEligible]
-  );
+  let invResult;
+  try {
+    [invResult] = await conn.query(
+      `INSERT INTO investments
+        (user_id, plan_type, token_amount, total_return, daily_roi_rate, sellable_amount, locked_amount, end_date, income_eligible)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [userId, planType, tokenAmount, totalReturn, plan.dailyRoi, sellable, locked, endDate, incomeEligible]
+    );
+  } catch (err) {
+    if (err.code !== 'ER_BAD_FIELD_ERROR' || !String(err.sqlMessage || '').includes('income_eligible')) {
+      throw err;
+    }
+    [invResult] = await conn.query(
+      `INSERT INTO investments
+        (user_id, plan_type, token_amount, total_return, daily_roi_rate, sellable_amount, locked_amount, end_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [userId, planType, tokenAmount, totalReturn, plan.dailyRoi, sellable, locked, endDate]
+    );
+  }
 
   return {
     investmentId: invResult.insertId,

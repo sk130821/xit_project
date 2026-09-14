@@ -9,7 +9,7 @@ import adminRoutes from './routes/adminRoutes.js';
 import adminAuthRoutes from './routes/adminAuthRoutes.js';
 import blockchainRoutes from './routes/blockchainRoutes.js';
 import { startAutoRoiCron } from './jobs/autoRoiCron.js';
-import { runDailyPayoutCron, debugPayoutCron } from './controllers/cronController.js';
+import { runDailyPayoutCron, debugPayoutCron, retrySellPayoutsCron } from './controllers/cronController.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -43,6 +43,8 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/cron/daily-payout', runDailyPayoutCron);
 app.post('/api/cron/daily-payout', runDailyPayoutCron);
+app.get('/api/cron/retry-sell-payouts', retrySellPayoutsCron);
+app.post('/api/cron/retry-sell-payouts', retrySellPayoutsCron);
 app.get('/api/cron/debug-payout', debugPayoutCron);
 
 app.use('/api/auth', authRoutes);

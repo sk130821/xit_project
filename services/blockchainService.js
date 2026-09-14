@@ -222,6 +222,13 @@ export async function verifySellTokenTransfer(conn, txHash, expectedTokenAmount,
   const [existing] = await conn.query('SELECT id FROM transactions WHERE tx_hash = ?', [txHash]);
   if (existing.length > 0) throw new Error('Transaction hash already used');
 
+  try {
+    const [existingOrders] = await conn.query('SELECT id FROM sell_orders WHERE xit_tx_hash = ?', [txHash]);
+    if (existingOrders.length > 0) throw new Error('Transaction hash already used');
+  } catch (err) {
+    if (err.code !== 'ER_NO_SUCH_TABLE') throw err;
+  }
+
   const expectedWei = ethers.parseUnits(expectedTokenAmount.toFixed(8), config.tokenDecimals);
   const iface = new ethers.Interface(ERC20_ABI);
   let found = false;
@@ -258,7 +265,7 @@ export async function verifySellTokenTransfer(conn, txHash, expectedTokenAmount,
 export const MIN_ADMIN_BNB_GAS = 0.001;
 
 /** Minimum BNB user wallet must hold to send XIT on sell */
-export const MIN_USER_BNB_GAS = 0.0003;
+export const MIN_USER_BNB_GAS = 0.001;
 
 /** Verify admin can pay user before any on-chain sell proceeds. */
 export async function validateAdminSellPayout(conn, paymentAmount) {
@@ -338,16 +345,35 @@ export async function sendPaymentPayout(conn, toAddress, paymentAmount) {
   const wallet = getWallet(privateKey, provider);
   const amountWei = ethers.parseUnits(paymentAmount.toFixed(8), config.paymentDecimals);
 
-  if (!config.paymentTokenAddress) {
-    const tx = await wallet.sendTransaction({ to: toAddress, value: amountWei });
-    const receipt = await tx.wait();
+  let sentTx = null;
+  try {
+    if (!config.paymentTokenAddress) {
+      sentTx = await wallet.sendTransaction({ to: toAddress, value: amountWei });
+    } else {
+      const contract = new ethers.Contract(config.paymentTokenAddress, ERC20_ABI, wallet);
+      sentTx = await contract.transfer(toAddress, amountWei);
+    }
+    const receipt = await sentTx.wait();
     return { txHash: receipt.hash, chainId: config.chainId };
+  } catch (err) {
+    if (sentTx?.hash) {
+      const wrapped = new Error(err.message || 'Payout confirmation timed out');
+      wrapped.payoutSubmitted = true;
+      wrapped.txHash = sentTx.hash;
+      throw wrapped;
+    }
+    throw err;
   }
+}
 
-  const contract = new ethers.Contract(config.paymentTokenAddress, ERC20_ABI, wallet);
-  const tx = await contract.transfer(toAddress, amountWei);
-  const receipt = await tx.wait();
-  return { txHash: receipt.hash, chainId: config.chainId };
+/** Check whether a previously broadcast payout tx confirmed (no resend). */
+export async function confirmPayoutTransaction(conn, txHash) {
+  const config = await getBlockchainConfig(conn);
+  const provider = getProvider(config.rpcUrl);
+  const receipt = await provider.getTransactionReceipt(txHash);
+  if (!receipt) return { confirmed: false };
+  if (receipt.status !== 1) return { confirmed: false, failed: true };
+  return { confirmed: true, chainId: config.chainId };
 }
 
 export async function getTreasuryTokenBalance(conn) {

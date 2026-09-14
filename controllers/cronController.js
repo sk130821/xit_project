@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { runAutoRoiJob } from '../jobs/autoRoiCron.js';
 import { buildPayoutDebugReport } from '../services/payoutDebugService.js';
+import { retryOpenSellPayouts } from '../services/sellOrderService.js';
 
 function secretsMatch(provided, expected) {
   if (!provided || !expected) return false;
@@ -47,6 +48,25 @@ export async function runDailyPayoutCron(req, res) {
   } catch (err) {
     console.error('[cPanel Cron] HTTP job error:', err.message);
     return res.status(500).json({ error: err.message || 'Cron job failed' });
+  }
+}
+
+/** GET/POST /api/cron/retry-sell-payouts?secret=... — retry USDT after XIT was received */
+export async function retrySellPayoutsCron(req, res) {
+  if (!assertCronSecret(req, res)) return;
+
+  try {
+    const result = await retryOpenSellPayouts();
+    return res.json({
+      ok: true,
+      message: result.attempted
+        ? `Retried ${result.attempted} pending sell(s): ${result.completed} paid, ${result.failed} still pending`
+        : 'No pending sell payouts',
+      ...result,
+    });
+  } catch (err) {
+    console.error('[cPanel Cron] retry sell payouts error:', err.message);
+    return res.status(500).json({ error: err.message || 'Retry sell payouts failed' });
   }
 }
 

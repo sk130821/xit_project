@@ -1,6 +1,7 @@
 import { previewPayout, runPayout } from '../services/payoutService.js';
 import { getBlockchainConfig } from '../services/blockchainService.js';
 import { buildPayoutDebugReport } from '../services/payoutDebugService.js';
+import { listOpenSellOrders, retryOpenSellPayouts } from '../services/sellOrderService.js';
 import { pool } from '../db.js';
 
 function parsePayoutDate(raw) {
@@ -331,5 +332,43 @@ export async function getDailyTradeSummary(req, res) {
   } catch (err) {
     console.error('Daily trade summary error:', err);
     res.status(500).json({ error: 'Failed to load trade summary' });
+  }
+}
+
+export async function getPendingSellOrders(req, res) {
+  try {
+    const items = await listOpenSellOrders();
+    res.json({
+      success: true,
+      items,
+      count: items.length,
+    });
+  } catch (err) {
+    console.error('Pending sell orders error:', err);
+    res.status(500).json({ error: 'Failed to load pending sells' });
+  }
+}
+
+export async function retryPendingSellOrder(req, res) {
+  try {
+    const sellOrderId = Number(req.params.id || req.body?.id);
+    if (!sellOrderId) {
+      return res.status(400).json({ error: 'Sell order id is required' });
+    }
+    const result = await retryOpenSellPayouts({ sellOrderId });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('Retry sell payout error:', err);
+    res.status(500).json({ error: err.message || 'Failed to retry sell payout' });
+  }
+}
+
+export async function retryAllPendingSellOrders(req, res) {
+  try {
+    const result = await retryOpenSellPayouts();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('Retry all sell payouts error:', err);
+    res.status(500).json({ error: err.message || 'Failed to retry sell payouts' });
   }
 }

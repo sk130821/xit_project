@@ -8,6 +8,7 @@ import {
 import {
   getPayoutPreview, triggerPayout, getPayoutRuns, getPayoutDebug,
   getDailyPayoutSummary, getTradeHistory, getDailyTradeSummary,
+  getPendingSellOrders, retryPendingSellOrder, retryAllPendingSellOrders,
 } from '../controllers/adminPayoutController.js';
 import { getBusinessReport } from '../controllers/adminReportController.js';
 import { adminAuthMiddleware } from '../middleware/auth.js';
@@ -34,6 +35,9 @@ router.get('/payout/runs', adminAuthMiddleware, getPayoutRuns);
 router.get('/payout/daily', adminAuthMiddleware, getDailyPayoutSummary);
 router.get('/trades/history', adminAuthMiddleware, getTradeHistory);
 router.get('/trades/daily', adminAuthMiddleware, getDailyTradeSummary);
+router.get('/sell-orders/pending', adminAuthMiddleware, getPendingSellOrders);
+router.post('/sell-orders/retry-all', adminAuthMiddleware, retryAllPendingSellOrders);
+router.post('/sell-orders/:id/retry', adminAuthMiddleware, retryPendingSellOrder);
 router.get('/reports/business', adminAuthMiddleware, getBusinessReport);
 
 export default router;

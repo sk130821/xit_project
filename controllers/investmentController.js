@@ -1,20 +1,22 @@
 import { pool } from '../db.js';
-import { getSetting, distributeLevelBonus, distributeRewardBonus } from '../services/incomeService.js';
+import { distributeLevelBonus, distributeRewardBonus } from '../services/incomeService.js';
 import {
   getBlockchainConfig,
   isBlockchainMode,
   verifySellTokenTransfer,
-  sendPaymentPayout,
 } from '../services/blockchainService.js';
 import { createInvestmentForUser, formatRoiDescription, investmentHasIncomeEligible } from '../services/investmentService.js';
-import { creditUserXit, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
+import { creditUserXit } from '../services/tokenPayoutService.js';
+import { applyLockPlanCompletionSellable } from '../services/sellBalanceService.js';
+import { evaluateSellEligibility, runSellPreflight } from '../services/sellValidationService.js';
 import {
-  applyLockPlanCompletionSellable,
-  computeMemberSellable,
-  getInvestmentBalanceStats,
-  investmentAllowsSell,
-} from '../services/sellBalanceService.js';
-import { runSellPreflight } from '../services/sellValidationService.js';
+  applySellLedger,
+  attemptSellPayout,
+  buildSellResponse,
+  ensureSellOrdersTable,
+  findSellOrderByXitHash,
+  persistXitReceivedSell,
+} from '../services/sellOrderService.js';
 import { getISTDateString } from '../utils/istDate.js';
 
 const PLAN_CONFIG = {
@@ -188,233 +190,117 @@ export async function sellTokens(req, res) {
       return res.status(400).json({ error: 'Invalid amount' });
     }
 
-    await conn.beginTransaction();
-
-    const [users] = await conn.query('SELECT * FROM users WHERE id = ? FOR UPDATE', [req.userId]);
-    if (users.length === 0) {
-      await conn.rollback();
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const user = users[0];
-    if (!user.is_active) {
-      await conn.rollback();
-      return res.status(403).json({ error: 'Account not activated' });
-    }
-
-    const xitBalance = Number(user.xit_balance || 0);
-    const balanceStats = await getInvestmentBalanceStats(conn, req.userId);
-    const { planSellable: sellableFromInvestments, planLocked, lockRoiHeld } = balanceStats;
-
+    await ensureSellOrdersTable(conn);
     const config = await getBlockchainConfig(conn);
     const chainMode = isBlockchainMode(config.platformMode);
 
-    let totalSellable;
-    let amountFromXitBalance = 0;
-    let amountFromInvestments = 0;
-    let targetInvestmentId = investmentId ? Number(investmentId) : null;
-
-    if (targetInvestmentId) {
-      const [targetInvs] = await conn.query(
-        'SELECT id, sellable_amount, plan_type, status FROM investments WHERE id = ? AND user_id = ? FOR UPDATE',
-        [targetInvestmentId, req.userId]
-      );
-      if (targetInvs.length === 0) {
-        await conn.rollback();
-        return res.status(404).json({ error: 'Investment not found' });
-      }
-      const targetInv = targetInvs[0];
-      if (!investmentAllowsSell(targetInv)) {
-        await conn.rollback();
-        return res.status(400).json({ error: 'This investment has no sellable tokens' });
-      }
-      const invSellable = Number(targetInv.sellable_amount);
-      if (invSellable <= 0) {
-        await conn.rollback();
-        return res.status(400).json({ error: 'This investment has no sellable tokens' });
-      }
-      if (tokenAmount > invSellable) {
-        await conn.rollback();
-        return res.status(400).json({ error: `Maximum sellable from this investment is ${invSellable} XIT` });
-      }
-
-      amountFromInvestments = tokenAmount;
-      totalSellable = invSellable;
-
-      if (chainMode) {
-        if (!user.wallet_address) {
-          await conn.rollback();
-          return res.status(400).json({ error: 'Link your MetaMask wallet before selling in blockchain mode' });
+    if (chainMode && txHash) {
+      const existing = await findSellOrderByXitHash(conn, txHash);
+      if (existing) {
+        if (existing.user_id !== req.userId) {
+          return res.status(400).json({ error: 'Transaction hash already used' });
         }
-        const onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
-        if (tokenAmount > onChainBalance) {
-          await conn.rollback();
-          return res.status(400).json({ error: 'Insufficient XIT balance in your wallet' });
+        if (existing.status === 'completed') {
+          return res.status(400).json({ error: 'This sell was already completed' });
         }
-      }
-    } else if (chainMode) {
-      if (!user.wallet_address) {
-        await conn.rollback();
-        return res.status(400).json({ error: 'Link your MetaMask wallet before selling in blockchain mode' });
-      }
-
-      const onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
-      const sellableView = computeMemberSellable(
-        onChainBalance,
-        sellableFromInvestments,
-        planLocked,
-        lockRoiHeld,
-        true
-      );
-      totalSellable = sellableView.totalSellable;
-
-      if (tokenAmount > totalSellable) {
-        await conn.rollback();
-        return res.status(400).json({ error: 'Insufficient sellable XIT tokens (plan hold or wallet balance)' });
-      }
-
-      if (tokenAmount > onChainBalance) {
-        await conn.rollback();
-        return res.status(400).json({ error: 'Insufficient XIT balance in your wallet' });
-      }
-
-      amountFromXitBalance = Math.min(tokenAmount, sellableView.incomeSellable);
-      amountFromInvestments = tokenAmount - amountFromXitBalance;
-    } else {
-      const sellableView = computeMemberSellable(
-        xitBalance,
-        sellableFromInvestments,
-        planLocked,
-        lockRoiHeld
-      );
-      totalSellable = sellableView.totalSellable;
-
-      if (tokenAmount > totalSellable) {
-        await conn.rollback();
-        return res.status(400).json({ error: 'Insufficient sellable XIT tokens' });
-      }
-
-      amountFromXitBalance = Math.min(tokenAmount, sellableView.incomeSellable);
-      amountFromInvestments = tokenAmount - amountFromXitBalance;
-    }
-
-    const adminRateStr = await getSetting(conn, 'admin_charge_percent', '10');
-    const adminRate = parseFloat(adminRateStr);
-    const adminCharge = (tokenAmount * adminRate) / 100;
-    const netXit = tokenAmount - adminCharge;
-    const tokenPrice = parseFloat(await getSetting(conn, 'token_price', '1'));
-    const usdtPayout = netXit * tokenPrice;
-
-    let payoutTxHash = null;
-    let tokenReturnTxHash = null;
-    let payoutChainId = null;
-    let onChainStatus = 'demo';
-
-    if (chainMode) {
-      if (!txHash) {
-        await conn.rollback();
-        return res.status(400).json({ error: 'Send XIT to admin wallet first, then submit transaction hash' });
-      }
-
-      try {
-        await runSellPreflight(conn, req.userId, tokenAmount, investmentId);
-
-        const verified = await verifySellTokenTransfer(conn, txHash, tokenAmount, user.wallet_address);
-        tokenReturnTxHash = txHash;
-        payoutChainId = verified.chainId;
-
-        const paymentPayout = await sendPaymentPayout(conn, user.wallet_address, usdtPayout);
-        payoutTxHash = paymentPayout.txHash;
-        onChainStatus = 'confirmed';
-      } catch (chainErr) {
-        await conn.rollback();
-        return res.status(400).json({ error: chainErr.message || 'On-chain sell failed' });
+        const retry = await attemptSellPayout(existing);
+        const order = await findSellOrderByXitHash(conn, txHash);
+        return res.json(buildSellResponse(order || existing, retry, config));
       }
     }
 
-    if (!chainMode && amountFromXitBalance > 0) {
-      await conn.query('UPDATE users SET xit_balance = xit_balance - ? WHERE id = ?', [amountFromXitBalance, req.userId]);
+    await conn.beginTransaction();
+
+    let quote;
+    try {
+      quote = await evaluateSellEligibility(conn, req.userId, tokenAmount, investmentId, { lock: true });
+    } catch (eligErr) {
+      await conn.rollback();
+      return res.status(400).json({ error: eligErr.message || 'Sell not allowed' });
     }
 
-    if (amountFromInvestments > 0) {
-      if (targetInvestmentId) {
-        await conn.query(
-          'UPDATE investments SET sellable_amount = sellable_amount - ? WHERE id = ? AND user_id = ?',
-          [amountFromInvestments, targetInvestmentId, req.userId]
-        );
-      } else {
-        let remainder = amountFromInvestments;
-
-        while (remainder > 0) {
-          const [invs] = await conn.query(
-            `SELECT id, sellable_amount FROM investments
-             WHERE user_id = ? AND sellable_amount > 0
-               AND (status = 'active' OR (status = 'completed' AND plan_type IN ('lock', 'flexible_lock')))
-             ORDER BY created_at LIMIT 1 FOR UPDATE`,
-            [req.userId]
-          );
-
-          if (invs.length === 0) break;
-
-          const inv = invs[0];
-          const available = Number(inv.sellable_amount);
-
-          if (available >= remainder) {
-            await conn.query('UPDATE investments SET sellable_amount = sellable_amount - ? WHERE id = ?', [remainder, inv.id]);
-            remainder = 0;
-          } else {
-            await conn.query('UPDATE investments SET sellable_amount = 0 WHERE id = ?', [inv.id]);
-            remainder -= available;
-          }
-        }
-      }
-
-      await conn.query(
-        'UPDATE users SET total_invested = GREATEST(0, total_invested - ?) WHERE id = ?',
-        [amountFromInvestments, req.userId]
-      );
-    }
-
-    if (!chainMode) {
+    if (!quote.chainMode) {
+      await applySellLedger(conn, {
+        userId: req.userId,
+        amountFromXitBalance: quote.amountFromXitBalance,
+        amountFromInvestments: quote.amountFromInvestments,
+        targetInvestmentId: quote.targetInvestmentId,
+        chainMode: false,
+      });
       await conn.query(
         'UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?',
-        [usdtPayout, req.userId]
+        [quote.usdtPayout, req.userId]
       );
+      await conn.query(
+        'INSERT INTO transactions (user_id, type, amount, description, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [
+          req.userId,
+          'sell',
+          quote.usdtPayout,
+          `Sold ${tokenAmount} XIT → ${quote.usdtPayout.toFixed(2)} USDT (admin charge: ${quote.adminCharge} XIT)`,
+          null,
+          null,
+          'demo',
+        ]
+      );
+      await conn.commit();
+      return res.json({
+        success: true,
+        sold: tokenAmount,
+        investmentId: quote.targetInvestmentId,
+        adminCharge: quote.adminCharge,
+        net: quote.netXit,
+        usdtReceived: quote.usdtPayout,
+        paymentSymbol: 'USDT',
+        txHash: null,
+        tokenReturnTxHash: null,
+        mode: 'demo',
+        explorerUrl: null,
+        tokenReturnExplorerUrl: null,
+      });
     }
 
-    await conn.query(
-      'INSERT INTO transactions (user_id, type, amount, description, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [
-        req.userId,
-        'sell',
-        usdtPayout,
-        chainMode
-          ? `Sold ${tokenAmount} XIT → ${usdtPayout.toFixed(8)} ${config.paymentTokenSymbol} (admin charge ${adminCharge} XIT). XIT return: ${tokenReturnTxHash}`
-          : `Sold ${tokenAmount} XIT → ${usdtPayout.toFixed(2)} USDT (admin charge: ${adminCharge} XIT)`,
-        chainMode ? tokenReturnTxHash : payoutTxHash,
-        payoutChainId,
-        onChainStatus,
-      ]
-    );
+    if (!txHash) {
+      await conn.rollback();
+      return res.status(400).json({ error: 'Send XIT to admin wallet first, then submit transaction hash' });
+    }
 
-    await conn.commit();
+    try {
+      const verified = await verifySellTokenTransfer(conn, txHash, tokenAmount, quote.user.wallet_address);
+      await persistXitReceivedSell(conn, {
+        userId: req.userId,
+        tokenAmount,
+        adminCharge: quote.adminCharge,
+        netXit: quote.netXit,
+        usdtPayout: quote.usdtPayout,
+        paymentSymbol: quote.paymentSymbol,
+        amountFromXitBalance: quote.amountFromXitBalance,
+        amountFromInvestments: quote.amountFromInvestments,
+        targetInvestmentId: quote.targetInvestmentId,
+        xitTxHash: txHash,
+        chainId: verified.chainId,
+      });
+      await conn.commit();
+    } catch (chainErr) {
+      await conn.rollback();
+      if (chainErr.code === 'ER_DUP_ENTRY') {
+        const existing = await findSellOrderByXitHash(conn, txHash);
+        if (existing && existing.user_id === req.userId && existing.status !== 'completed') {
+          const retry = await attemptSellPayout(existing);
+          const order = await findSellOrderByXitHash(conn, txHash);
+          return res.json(buildSellResponse(order || existing, retry, config));
+        }
+        return res.status(400).json({ error: 'Transaction hash already used' });
+      }
+      return res.status(400).json({ error: chainErr.message || 'On-chain sell failed' });
+    }
 
-    res.json({
-      success: true,
-      sold: tokenAmount,
-      investmentId: targetInvestmentId,
-      adminCharge,
-      net: netXit,
-      usdtReceived: usdtPayout,
-      paymentSymbol: chainMode ? config.paymentTokenSymbol : 'USDT',
-      txHash: payoutTxHash,
-      tokenReturnTxHash,
-      mode: chainMode ? config.platformMode : 'demo',
-      explorerUrl: payoutTxHash ? `${config.blockExplorerUrl}/tx/${payoutTxHash}` : null,
-      tokenReturnExplorerUrl: tokenReturnTxHash ? `${config.blockExplorerUrl}/tx/${tokenReturnTxHash}` : null,
-    });
+    const order = await findSellOrderByXitHash(conn, txHash);
+    const payout = await attemptSellPayout(order);
+    const latest = await findSellOrderByXitHash(conn, txHash);
+    return res.json(buildSellResponse(latest || order, payout, config));
   } catch (err) {
-    await conn.rollback();
+    try { await conn.rollback(); } catch { /* ignore */ }
     console.error('Sell error:', err);
     res.status(500).json({ error: 'Server error during sale' });
   } finally {

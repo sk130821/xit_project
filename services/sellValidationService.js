@@ -17,12 +17,13 @@ import {
  * Validate sell amount against DB + on-chain rules (read-only).
  * Returns payout breakdown or throws with a user-facing message.
  */
-export async function evaluateSellEligibility(conn, userId, tokenAmount, investmentId = null) {
+export async function evaluateSellEligibility(conn, userId, tokenAmount, investmentId = null, options = {}) {
   if (!tokenAmount || tokenAmount <= 0) {
     throw new Error('Invalid amount');
   }
 
-  const [users] = await conn.query('SELECT * FROM users WHERE id = ?', [userId]);
+  const lockSql = options.lock ? ' FOR UPDATE' : '';
+  const [users] = await conn.query(`SELECT * FROM users WHERE id = ?${lockSql}`, [userId]);
   if (users.length === 0) {
     throw new Error('User not found');
   }
@@ -46,7 +47,7 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
 
   if (targetInvestmentId) {
     const [targetInvs] = await conn.query(
-      'SELECT id, sellable_amount, plan_type, status FROM investments WHERE id = ? AND user_id = ?',
+      `SELECT id, sellable_amount, plan_type, status FROM investments WHERE id = ? AND user_id = ?${lockSql}`,
       [targetInvestmentId, userId]
     );
     if (targetInvs.length === 0) {
