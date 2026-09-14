@@ -1,7 +1,7 @@
 import { pool } from '../db.js';
 import { getBlockchainConfig, isBlockchainMode } from './blockchainService.js';
 import { calculateInvestmentRoi } from './payoutService.js';
-import { getISTDateString } from '../utils/istDate.js';
+import { getISTDateString, toISTDateString } from '../utils/istDate.js';
 
 function maskAddress(addr) {
   if (!addr || typeof addr !== 'string') return null;
@@ -158,9 +158,7 @@ export async function buildPayoutDebugReport({ asOfDate = null } = {}) {
         tokenAmount: Number(inv.token_amount),
         dailyRoiRate: Number(inv.daily_roi_rate),
         lastRoiDate: inv.last_roi_date,
-        lastRoiNormalized: inv.last_roi_date
-          ? new Date(inv.last_roi_date).toISOString().split('T')[0]
-          : null,
+        lastRoiNormalized: inv.last_roi_date ? toISTDateString(inv.last_roi_date) : null,
         roiReceived: Number(inv.roi_received),
         totalReturn: Number(inv.total_return),
         hasWallet,

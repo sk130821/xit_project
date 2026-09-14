@@ -1,9 +1,4 @@
-import { getISTDateString } from '../utils/istDate.js';
-
-function normalizeDate(value) {
-  if (!value) return null;
-  return String(value).slice(0, 10);
-}
+import { getISTDateString, toISTDateString, daysBetweenYmd } from '../utils/istDate.js';
 
 /**
  * ROI for one investment row: respects token_amount, total_return cap, and end_date (plan term).
@@ -11,10 +6,10 @@ function normalizeDate(value) {
  */
 export function calculateInvestmentRoiAccrual(inv, asOfDate = null) {
   const today = asOfDate || getISTDateString();
-  const lastRoi = normalizeDate(inv.last_roi_date);
+  const lastRoi = toISTDateString(inv.last_roi_date);
   if (!lastRoi || lastRoi >= today) return null;
 
-  const endDate = normalizeDate(inv.end_date);
+  const endDate = toISTDateString(inv.end_date);
 
   if (endDate && lastRoi >= endDate) {
     return {
@@ -32,9 +27,7 @@ export function calculateInvestmentRoiAccrual(inv, asOfDate = null) {
     accrualThrough = endDate;
   }
 
-  const daysElapsed = Math.floor(
-    (new Date(accrualThrough).getTime() - new Date(lastRoi).getTime()) / (1000 * 60 * 60 * 24)
-  );
+  const daysElapsed = daysBetweenYmd(lastRoi, accrualThrough);
 
   if (daysElapsed <= 0) {
     if (endDate && today >= endDate) {

@@ -13,7 +13,7 @@ import { getISTDateString } from '../utils/istDate.js';
 import { calculateInvestmentRoiAccrual } from './roiAccrualService.js';
 
 /** Bump when uploading — must appear in cron.log or server is still on old file */
-export const PAYOUT_BUILD = '2026-09-14-roi-enddate-sell-cap-v6';
+export const PAYOUT_BUILD = '2026-09-15-roi-ist-date-normalize-v7';
 
 export function calculateInvestmentRoi(inv, asOfDate = null) {
   return calculateInvestmentRoiAccrual(inv, asOfDate);
@@ -280,6 +280,7 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
          i.daily_roi_rate,
          i.roi_received,
          i.last_roi_date,
+         i.end_date,
          i.status,
          u.username AS owner_username,
          u.wallet_address AS owner_wallet
@@ -328,6 +329,7 @@ export async function runPayout({ runType = 'manual', triggeredBy = 'admin', asO
         daily_roi_rate: row.daily_roi_rate,
         roi_received: row.roi_received,
         last_roi_date: row.last_roi_date,
+        end_date: row.end_date,
         status: row.status,
       };
 
