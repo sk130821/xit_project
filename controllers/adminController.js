@@ -1,6 +1,8 @@
 import { pool } from '../db.js';
 import bcrypt from 'bcryptjs';
 import { generateUserToken } from '../middleware/auth.js';
+import { getSetting } from '../services/incomeService.js';
+import { creditUserXit } from '../services/tokenPayoutService.js';
 
 export async function getStats(req, res) {
   try {
@@ -321,6 +323,84 @@ export async function changeUserPassword(req, res) {
   } catch (err) {
     console.error('changeUserPassword error:', err);
     res.status(500).json({ error: 'Server error' });
+  }
+}
+
+/** Send XIT to a member (no USDT). Demo: xit_balance; chain: on-chain transfer from admin payout wallet. */
+export async function grantXit(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    const { targetId, amount, note } = req.body;
+    const tokenAmount = Number(amount);
+
+    if (!targetId || !Number.isFinite(tokenAmount) || tokenAmount <= 0) {
+      return res.status(400).json({ error: 'targetId and a positive amount are required' });
+    }
+
+    const maxGrant = parseFloat(await getSetting(conn, 'admin_grant_max_xit', '1000000'));
+    if (tokenAmount > maxGrant) {
+      return res.status(400).json({ error: `Maximum grant per transaction is ${maxGrant} XIT` });
+    }
+
+    await conn.beginTransaction();
+
+    const [users] = await conn.query(
+      'SELECT id, username, is_active, wallet_address FROM users WHERE id = ? FOR UPDATE',
+      [targetId]
+    );
+    if (users.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const user = users[0];
+    if (!user.is_active) {
+      await conn.rollback();
+      return res.status(400).json({ error: 'Member account is inactive. Activate the account first.' });
+    }
+
+    const payout = await creditUserXit(conn, targetId, tokenAmount, { skipTotalEarned: true });
+
+    const noteText = note ? String(note).trim().slice(0, 500) : '';
+    const description = noteText
+      ? `Admin XIT grant (no USDT): ${noteText} — by ${req.adminEmail}`
+      : `Admin XIT grant (no USDT) by ${req.adminEmail}`;
+
+    await conn.query(
+      'INSERT INTO transactions (user_id, type, amount, description, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [
+        targetId,
+        'admin_grant',
+        tokenAmount,
+        description,
+        payout.txHash,
+        payout.chainId,
+        payout.onChainStatus,
+      ]
+    );
+
+    await conn.commit();
+
+    res.json({
+      success: true,
+      targetId: Number(targetId),
+      username: user.username,
+      amount: tokenAmount,
+      credited: payout.credited,
+      chainMode: payout.chainMode,
+      txHash: payout.txHash,
+      chainId: payout.chainId,
+      onChainStatus: payout.onChainStatus,
+      walletAddress: user.wallet_address,
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('grantXit error:', err);
+    const msg = err.message || 'Grant failed';
+    const status = msg.includes('wallet') || msg.includes('Wallet') || msg.includes('configured') ? 400 : 500;
+    res.status(status).json({ error: msg });
+  } finally {
+    conn.release();
   }
 }
 

@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS investments (
 CREATE TABLE IF NOT EXISTS transactions (
   id INT AUTO_INCREMENT PRIMARY KEY,
   user_id INT NOT NULL,
-  type ENUM('buy','sell','invest','roi','referral_bonus','level_bonus','reward_bonus','commission','admin_credit','admin_debit','withdraw') NOT NULL,
+  type ENUM('buy','sell','invest','roi','referral_bonus','level_bonus','reward_bonus','commission','admin_credit','admin_debit','admin_grant','withdraw') NOT NULL,
   amount DECIMAL(20,8) NOT NULL,
   description TEXT,
   related_user_id INT DEFAULT NULL,

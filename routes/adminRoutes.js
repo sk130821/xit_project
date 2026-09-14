@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import {
-  getStats, getUsers, getUserDetail, creditDebit, toggleActivation,
+  getStats, getUsers, getUserDetail, creditDebit, grantXit, toggleActivation,
   loginAsUser, changeUserPassword,
   updateLevelBonus, updateRewardTier, updateSetting,
   getLevelBonusRates, getRewardTiers,
@@ -23,6 +23,7 @@ router.post('/change-password', adminAuthMiddleware, changeUserPassword);
 router.get('/level-bonus-rates', adminAuthMiddleware, getLevelBonusRates);
 router.get('/reward-tiers', adminAuthMiddleware, getRewardTiers);
 router.post('/credit-debit', adminAuthMiddleware, creditDebit);
+router.post('/grant-xit', adminAuthMiddleware, grantXit);
 router.post('/toggle-activation', adminAuthMiddleware, toggleActivation);
 router.post('/update-level-bonus', adminAuthMiddleware, updateLevelBonus);
 router.post('/update-reward-tier', adminAuthMiddleware, updateRewardTier);

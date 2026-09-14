@@ -7,7 +7,8 @@ import {
 } from '../services/blockchainService.js';
 import { createInvestmentForUser, formatRoiDescription, investmentHasIncomeEligible } from '../services/investmentService.js';
 import { creditUserXit } from '../services/tokenPayoutService.js';
-import { applyLockPlanCompletionSellable } from '../services/sellBalanceService.js';
+import { applyLockPlanCompletionSellable, unlockMaturedLockRoiSellable } from '../services/sellBalanceService.js';
+import { calculateInvestmentRoiAccrual } from '../services/roiAccrualService.js';
 import { evaluateSellEligibility, runSellPreflight } from '../services/sellValidationService.js';
 import {
   applySellLedger,
@@ -68,25 +69,22 @@ export async function claimRoi(req, res) {
       return res.status(400).json({ error: 'Investment is not active' });
     }
 
-    const today = getISTDateString();
-    const lastRoi = new Date(inv.last_roi_date).toISOString().split('T')[0];
-
-    if (lastRoi >= today) {
+    const calc = calculateInvestmentRoiAccrual(inv);
+    if (!calc) {
       await conn.rollback();
       return res.status(400).json({ error: 'ROI already claimed today' });
     }
 
-    const daysElapsed = Math.floor((new Date(today) - new Date(lastRoi)) / (1000 * 60 * 60 * 24));
-    const dailyEarning = (Number(inv.token_amount) * Number(inv.daily_roi_rate)) / 100;
-    let totalClaimable = dailyEarning * daysElapsed;
-
-    const remaining = Number(inv.total_return) - Number(inv.roi_received);
-    if (totalClaimable > remaining) {
-      totalClaimable = remaining;
-    }
+    const totalClaimable = calc.roi;
 
     if (totalClaimable <= 0) {
-      await conn.query('UPDATE investments SET status = ? WHERE id = ?', ['completed', investmentId]);
+      if (calc.completed) {
+        await conn.query('UPDATE investments SET status = ?, last_roi_date = ? WHERE id = ?', [
+          'completed',
+          calc.lastRoiDate,
+          investmentId,
+        ]);
+      }
       await conn.commit();
       return res.json({ success: true, completed: true, roi: 0 });
     }
@@ -94,11 +92,11 @@ export async function claimRoi(req, res) {
     const payout = await creditUserXit(conn, req.userId, totalClaimable);
 
     const newRoiReceived = Number(inv.roi_received) + totalClaimable;
-    const newStatus = newRoiReceived >= Number(inv.total_return) ? 'completed' : 'active';
+    const newStatus = calc.completed ? 'completed' : 'active';
 
     await conn.query(
-      'UPDATE investments SET roi_received = ?, last_roi_date = CURRENT_DATE(), status = ? WHERE id = ?',
-      [newRoiReceived, newStatus, investmentId]
+      'UPDATE investments SET roi_received = ?, last_roi_date = ?, status = ? WHERE id = ?',
+      [newRoiReceived, calc.lastRoiDate, newStatus, investmentId]
     );
 
     await applyLockPlanCompletionSellable(conn, investmentId, inv.plan_type, newStatus, newRoiReceived);
@@ -136,8 +134,10 @@ export async function claimRoi(req, res) {
 }
 
 export async function listInvestments(req, res) {
+  const conn = await pool.getConnection();
   try {
-    const [investments] = await pool.query(
+    await unlockMaturedLockRoiSellable(conn, req.userId);
+    const [investments] = await conn.query(
       'SELECT * FROM investments WHERE user_id = ? ORDER BY created_at DESC',
       [req.userId]
     );
@@ -154,6 +154,8 @@ export async function listInvestments(req, res) {
     })));
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
+  } finally {
+    conn.release();
   }
 }
 

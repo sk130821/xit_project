@@ -117,7 +117,9 @@ export async function creditUserXit(conn, userId, amount, options = {}) {
     await conn.query(`UPDATE users SET xit_balance = xit_balance + ? WHERE id = ${uid}`, [amount]);
   }
 
-  await conn.query(`UPDATE users SET total_earned = total_earned + ? WHERE id = ${uid}`, [amount]);
+  if (!options.skipTotalEarned) {
+    await conn.query(`UPDATE users SET total_earned = total_earned + ? WHERE id = ${uid}`, [amount]);
+  }
 
   return {
     credited: amount,

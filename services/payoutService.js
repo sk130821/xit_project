@@ -10,36 +10,13 @@ import { getBlockchainConfig, isBlockchainMode } from './blockchainService.js';
 import { formatRoiDescription, investmentHasIncomeEligible } from './investmentService.js';
 import { applyLockPlanCompletionSellable } from './sellBalanceService.js';
 import { getISTDateString } from '../utils/istDate.js';
+import { calculateInvestmentRoiAccrual } from './roiAccrualService.js';
 
 /** Bump when uploading — must appear in cron.log or server is still on old file */
-export const PAYOUT_BUILD = '2026-09-12-roi-always-level-reward-min-wallet-v5';
+export const PAYOUT_BUILD = '2026-09-14-roi-enddate-sell-cap-v6';
 
 export function calculateInvestmentRoi(inv, asOfDate = null) {
-  const today = asOfDate || getISTDateString();
-  const lastRoi = new Date(inv.last_roi_date).toISOString().split('T')[0];
-
-  if (lastRoi >= today) return null;
-
-  const daysElapsed = Math.floor((new Date(today) - new Date(lastRoi)) / (1000 * 60 * 60 * 24));
-  if (daysElapsed <= 0) return null;
-
-  const dailyEarning = (Number(inv.token_amount) * Number(inv.daily_roi_rate)) / 100;
-  let totalClaimable = dailyEarning * daysElapsed;
-
-  const remaining = Number(inv.total_return) - Number(inv.roi_received);
-  if (totalClaimable > remaining) totalClaimable = remaining;
-
-  if (totalClaimable <= 0) {
-    return { investmentId: inv.id, userId: inv.user_id, roi: 0, days: daysElapsed, completed: true };
-  }
-
-  return {
-    investmentId: inv.id,
-    userId: inv.user_id,
-    roi: totalClaimable,
-    days: daysElapsed,
-    completed: Number(inv.roi_received) + totalClaimable >= Number(inv.total_return),
-  };
+  return calculateInvestmentRoiAccrual(inv, asOfDate);
 }
 
 async function previewLevelBonus(conn, earnerId, roiAmount) {
@@ -164,7 +141,10 @@ async function processInvestmentRoi(conn, inv, owner, description = 'Daily ROI p
 
   if (calc.roi <= 0) {
     if (calc.completed) {
-      await conn.query(`UPDATE investments SET status = ? WHERE id = ${investmentId}`, ['completed']);
+      await conn.query(
+        `UPDATE investments SET status = ?, last_roi_date = ? WHERE id = ${investmentId}`,
+        ['completed', calc.lastRoiDate || getISTDateString()]
+      );
     }
     return { investmentId, roi: 0, levelBonus: 0, rewardBonus: 0, completed: calc.completed };
   }
@@ -198,8 +178,8 @@ async function processInvestmentRoi(conn, inv, owner, description = 'Daily ROI p
   }
 
   const newRoiReceived = Number(inv.roi_received) + totalClaimable;
-  const newStatus = newRoiReceived >= Number(inv.total_return) ? 'completed' : 'active';
-  const lastRoiDate = payoutDate || getISTDateString();
+  const newStatus = calc.completed ? 'completed' : 'active';
+  const lastRoiDate = calc.lastRoiDate || payoutDate || getISTDateString();
 
   await conn.query(
     `UPDATE investments SET roi_received = ?, last_roi_date = ?, status = ? WHERE id = ${investmentId} AND user_id = ${ownerUserId}`,

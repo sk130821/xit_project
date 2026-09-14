@@ -1,5 +1,6 @@
 import { pool } from '../db.js';
 import { confirmPayoutTransaction, sendPaymentPayout } from './blockchainService.js';
+import { deductInvestmentSellable } from './sellBalanceService.js';
 
 const OPEN_STATUSES = ['xit_received', 'payout_failed', 'payout_submitted'];
 
@@ -54,10 +55,7 @@ export async function applySellLedger(conn, {
 
   if (amountFromInvestments > 0) {
     if (targetInvestmentId) {
-      await conn.query(
-        'UPDATE investments SET sellable_amount = sellable_amount - ? WHERE id = ? AND user_id = ?',
-        [amountFromInvestments, targetInvestmentId, userId]
-      );
+      await deductInvestmentSellable(conn, targetInvestmentId, userId, amountFromInvestments);
     } else {
       let remainder = amountFromInvestments;
 
@@ -76,10 +74,10 @@ export async function applySellLedger(conn, {
         const available = Number(inv.sellable_amount);
 
         if (available >= remainder) {
-          await conn.query('UPDATE investments SET sellable_amount = sellable_amount - ? WHERE id = ?', [remainder, inv.id]);
+          await deductInvestmentSellable(conn, inv.id, userId, remainder);
           remainder = 0;
         } else {
-          await conn.query('UPDATE investments SET sellable_amount = 0 WHERE id = ?', [inv.id]);
+          await deductInvestmentSellable(conn, inv.id, userId, available);
           remainder -= available;
         }
       }

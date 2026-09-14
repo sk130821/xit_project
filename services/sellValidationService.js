@@ -47,7 +47,7 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
 
   if (targetInvestmentId) {
     const [targetInvs] = await conn.query(
-      `SELECT id, sellable_amount, plan_type, status FROM investments WHERE id = ? AND user_id = ?${lockSql}`,
+      `SELECT id, sellable_amount, plan_type, status, end_date FROM investments WHERE id = ? AND user_id = ?${lockSql}`,
       [targetInvestmentId, userId]
     );
     if (targetInvs.length === 0) {
