@@ -16,8 +16,12 @@ import {
 /**
  * Validate sell amount against DB + on-chain rules (read-only).
  * Returns payout breakdown or throws with a user-facing message.
+ *
+ * options.postTransferVerified — XIT already sent on-chain; use wallet balance + tokenAmount
+ *   for sellable math (avoid false "insufficient" after MetaMask transfer).
  */
 export async function evaluateSellEligibility(conn, userId, tokenAmount, investmentId = null, options = {}) {
+  const postTransferVerified = Boolean(options.postTransferVerified);
   if (!tokenAmount || tokenAmount <= 0) {
     throw new Error('Invalid amount');
   }
@@ -72,9 +76,11 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
       if (!user.wallet_address) {
         throw new Error('Link your MetaMask wallet before selling in blockchain mode');
       }
-      const onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
-      if (tokenAmount > onChainBalance) {
-        throw new Error('Insufficient XIT balance in your wallet');
+      if (!postTransferVerified) {
+        const onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
+        if (tokenAmount > onChainBalance) {
+          throw new Error('Insufficient XIT balance in your wallet');
+        }
       }
     }
   } else if (chainMode) {
@@ -83,8 +89,9 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
     }
 
     const onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
+    const balanceForSellable = postTransferVerified ? onChainBalance + tokenAmount : onChainBalance;
     const sellableView = computeMemberSellable(
-      onChainBalance,
+      balanceForSellable,
       sellableFromInvestments,
       planLocked,
       lockRoiHeld,
@@ -96,7 +103,7 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
       throw new Error('Insufficient sellable XIT tokens (plan hold or wallet balance)');
     }
 
-    if (tokenAmount > onChainBalance) {
+    if (!postTransferVerified && tokenAmount > onChainBalance) {
       throw new Error('Insufficient XIT balance in your wallet');
     }
 

@@ -214,8 +214,34 @@ export async function sellTokens(req, res) {
     await conn.beginTransaction();
 
     let quote;
+    let verifiedChain = null;
+
+    if (chainMode && txHash) {
+      const [lockedUsers] = await conn.query('SELECT wallet_address FROM users WHERE id = ? FOR UPDATE', [
+        req.userId,
+      ]);
+      if (!lockedUsers.length || !lockedUsers[0].wallet_address) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'Link your MetaMask wallet before selling in blockchain mode' });
+      }
+      try {
+        verifiedChain = await verifySellTokenTransfer(
+          conn,
+          txHash,
+          tokenAmount,
+          lockedUsers[0].wallet_address
+        );
+      } catch (verifyErr) {
+        await conn.rollback();
+        return res.status(400).json({ error: verifyErr.message || 'On-chain XIT transfer not verified' });
+      }
+    }
+
     try {
-      quote = await evaluateSellEligibility(conn, req.userId, tokenAmount, investmentId, { lock: true });
+      quote = await evaluateSellEligibility(conn, req.userId, tokenAmount, investmentId, {
+        lock: true,
+        postTransferVerified: Boolean(chainMode && txHash && verifiedChain),
+      });
     } catch (eligErr) {
       await conn.rollback();
       return res.status(400).json({ error: eligErr.message || 'Sell not allowed' });
@@ -268,7 +294,12 @@ export async function sellTokens(req, res) {
     }
 
     try {
-      const verified = await verifySellTokenTransfer(conn, txHash, tokenAmount, quote.user.wallet_address);
+      const verified = verifiedChain || (await verifySellTokenTransfer(
+        conn,
+        txHash,
+        tokenAmount,
+        quote.user.wallet_address
+      ));
       await persistXitReceivedSell(conn, {
         userId: req.userId,
         tokenAmount,
