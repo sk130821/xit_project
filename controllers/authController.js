@@ -6,7 +6,7 @@ import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
 import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
 import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
-import { computeMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+import { computePlanOnlyMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
 
 const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
@@ -515,21 +515,8 @@ export async function getMe(req, res) {
 
       if (chainMode && user.wallet_address) {
         onChainXitBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
-        totalSellable = computeMemberSellable(
-          onChainXitBalance,
-          planSellable,
-          planLocked,
-          lockRoiHeld,
-          true
-        ).totalSellable;
-      } else if (!chainMode) {
-        totalSellable = computeMemberSellable(
-          Number(user.xit_balance || 0),
-          planSellable,
-          planLocked,
-          lockRoiHeld
-        ).totalSellable;
       }
+      totalSellable = computePlanOnlyMemberSellable(planSellable).totalSellable;
     } finally {
       conn.release();
     }

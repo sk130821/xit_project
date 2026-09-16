@@ -10,7 +10,7 @@ import {
 import { getSetting, distributeReferralBonus } from '../services/incomeService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
 import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
-import { computeMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+import { computePlanOnlyMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
 
 export async function getConfig(req, res) {
   try {
@@ -74,20 +74,21 @@ export async function getMemberWalletBalance(req, res) {
     }
 
     const walletAddress = users[0].wallet_address;
+    const { planSellable, planLocked, lockRoiHeld } = await getInvestmentBalanceStats(conn, req.userId);
+    const sellableView = computePlanOnlyMemberSellable(planSellable);
+
     if (!walletAddress) {
       return res.json({
         chainMode: true,
         onChainXitBalance: 0,
-        planSellable: 0,
-        planLocked: 0,
-        totalSellable: 0,
+        planSellable,
+        planLocked,
+        lockRoiHeld,
+        totalSellable: sellableView.totalSellable,
         incomeBalance: 0,
       });
     }
-
-    const { planSellable, planLocked, lockRoiHeld } = await getInvestmentBalanceStats(conn, req.userId);
     const onChainXitBalance = await getUserOnChainXitBalance(conn, walletAddress);
-    const sellableView = computeMemberSellable(onChainXitBalance, planSellable, planLocked, lockRoiHeld, true);
 
     res.json({
       chainMode: true,

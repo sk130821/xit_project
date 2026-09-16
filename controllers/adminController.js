@@ -4,7 +4,7 @@ import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
 import { creditUserXit, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
 import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
-import { computeMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+import { computePlanOnlyMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
 import { distributeReferralBonus } from '../services/incomeService.js';
 import { applySellFailedCompensation } from '../services/sellCompensationService.js';
@@ -260,41 +260,20 @@ export async function getUserDetail(req, res) {
       totalSellable: 0,
     };
 
+    const planView = computePlanOnlyMemberSellable(balanceStats.planSellable);
+    let onChainXit = null;
     if (chainMode && u.wallet_address) {
-      const onChainXit = await getUserOnChainXitBalance(conn, u.wallet_address);
-      const view = computeMemberSellable(
-        onChainXit,
-        balanceStats.planSellable,
-        balanceStats.planLocked,
-        balanceStats.lockRoiHeld,
-        true
-      );
-      sellBalance = {
-        chainMode: true,
-        onChainXit,
-        planSellable: balanceStats.planSellable,
-        planLocked: balanceStats.planLocked,
-        lockRoiHeld: balanceStats.lockRoiHeld,
-        incomeSellable: view.incomeSellable,
-        totalSellable: view.totalSellable,
-      };
-    } else if (!chainMode) {
-      const view = computeMemberSellable(
-        Number(u.xit_balance || 0),
-        balanceStats.planSellable,
-        balanceStats.planLocked,
-        balanceStats.lockRoiHeld
-      );
-      sellBalance = {
-        chainMode: false,
-        onChainXit: null,
-        planSellable: balanceStats.planSellable,
-        planLocked: balanceStats.planLocked,
-        lockRoiHeld: balanceStats.lockRoiHeld,
-        incomeSellable: view.incomeSellable,
-        totalSellable: view.totalSellable,
-      };
+      onChainXit = await getUserOnChainXitBalance(conn, u.wallet_address);
     }
+    sellBalance = {
+      chainMode,
+      onChainXit,
+      planSellable: balanceStats.planSellable,
+      planLocked: balanceStats.planLocked,
+      lockRoiHeld: balanceStats.lockRoiHeld,
+      incomeSellable: planView.incomeSellable,
+      totalSellable: planView.totalSellable,
+    };
 
     const [team] = await conn.query(
       `SELECT u.id, u.username, u.email, u.referral_code, u.total_invested, u.total_purchased,

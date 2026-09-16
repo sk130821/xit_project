@@ -42,8 +42,27 @@ export async function unlockMaturedLockRoiSellable(conn, userId) {
   );
 }
 
+/** If sellable was reduced but flexible principal was not, sync token_amount + ROI cap. */
+export async function reconcileActiveFlexiblePrincipal(conn, userId) {
+  const [rows] = await conn.query(
+    `SELECT id, token_amount, sellable_amount FROM investments
+     WHERE user_id = ? AND plan_type = 'flexible' AND status = 'active'`,
+    [userId]
+  );
+
+  for (const inv of rows) {
+    const principal = Number(inv.token_amount);
+    const sellable = Number(inv.sellable_amount);
+    const gap = roundXit(principal - sellable);
+    if (gap > 1e-8) {
+      await applyPrincipalReductionAfterSell(conn, inv.id, userId, gap);
+    }
+  }
+}
+
 export async function getInvestmentBalanceStats(conn, userId) {
   await unlockMaturedLockRoiSellable(conn, userId);
+  await reconcileActiveFlexiblePrincipal(conn, userId);
 
   const today = getISTDateString();
   const [rows] = await conn.query(
@@ -87,6 +106,16 @@ export function computeMemberSellable(walletBalance, planSellable, planLocked, l
     lockRoiHeld: lockHeld,
     planSellable: sellable,
     planLocked: locked,
+  };
+}
+
+/** Member-facing sellable: plan slice only (flexible / matured lock sellable), not wallet−locks. */
+export function computePlanOnlyMemberSellable(planSellable) {
+  const sellable = roundXit(Number(planSellable) || 0);
+  return {
+    totalSellable: sellable,
+    incomeSellable: 0,
+    planSellable: sellable,
   };
 }
 

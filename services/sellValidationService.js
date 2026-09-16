@@ -8,7 +8,7 @@ import {
 } from './blockchainService.js';
 import { getUserOnChainXitBalance } from './tokenPayoutService.js';
 import {
-  computeMemberSellable,
+  computePlanOnlyMemberSellable,
   getInvestmentBalanceStats,
   investmentAllowsSell,
 } from './sellBalanceService.js';
@@ -88,42 +88,28 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
       throw new Error('Link your MetaMask wallet before selling in blockchain mode');
     }
 
-    const onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
-    const balanceForSellable = postTransferVerified ? onChainBalance + tokenAmount : onChainBalance;
-    const sellableView = computeMemberSellable(
-      balanceForSellable,
-      sellableFromInvestments,
-      planLocked,
-      lockRoiHeld,
-      true
-    );
-    totalSellable = sellableView.totalSellable;
+    totalSellable = computePlanOnlyMemberSellable(sellableFromInvestments).totalSellable;
 
     if (tokenAmount > totalSellable) {
-      throw new Error('Insufficient sellable XIT tokens (plan hold or wallet balance)');
+      throw new Error(`Maximum sellable from your plan is ${totalSellable} XIT`);
     }
 
+    const onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
     if (!postTransferVerified && tokenAmount > onChainBalance) {
       throw new Error('Insufficient XIT balance in your wallet');
     }
 
-    amountFromXitBalance = Math.min(tokenAmount, sellableView.incomeSellable);
-    amountFromInvestments = tokenAmount - amountFromXitBalance;
+    amountFromInvestments = tokenAmount;
+    amountFromXitBalance = 0;
   } else {
-    const sellableView = computeMemberSellable(
-      xitBalance,
-      sellableFromInvestments,
-      planLocked,
-      lockRoiHeld
-    );
-    totalSellable = sellableView.totalSellable;
+    totalSellable = computePlanOnlyMemberSellable(sellableFromInvestments).totalSellable;
 
     if (tokenAmount > totalSellable) {
       throw new Error('Insufficient sellable XIT tokens');
     }
 
-    amountFromXitBalance = Math.min(tokenAmount, sellableView.incomeSellable);
-    amountFromInvestments = tokenAmount - amountFromXitBalance;
+    amountFromInvestments = tokenAmount;
+    amountFromXitBalance = 0;
   }
 
   const adminRate = parseFloat(await getSetting(conn, 'admin_charge_percent', '10'));
