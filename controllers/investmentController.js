@@ -19,6 +19,7 @@ import {
   persistXitReceivedSell,
 } from '../services/sellOrderService.js';
 import { getISTDateString } from '../utils/istDate.js';
+import { recordFailedSellStandalone } from '../services/tradeFailureService.js';
 
 const PLAN_CONFIG = {
   lock: { profitMultiplier: 3, dailyRoi: 0.82, sellablePercent: 0, lockedPercent: 100 },
@@ -233,6 +234,15 @@ export async function sellTokens(req, res) {
         );
       } catch (verifyErr) {
         await conn.rollback();
+        await recordFailedSellStandalone({
+          userId: req.userId,
+          tokenAmount,
+          txHash,
+          chainId: null,
+          usdtAmount: 0,
+          reason: verifyErr.message || 'On-chain XIT transfer not verified',
+          xitVerifiedOnChain: false,
+        });
         return res.status(400).json({ error: verifyErr.message || 'On-chain XIT transfer not verified' });
       }
     }
@@ -244,6 +254,17 @@ export async function sellTokens(req, res) {
       });
     } catch (eligErr) {
       await conn.rollback();
+      if (chainMode && txHash && verifiedChain) {
+        await recordFailedSellStandalone({
+          userId: req.userId,
+          tokenAmount,
+          txHash,
+          chainId: verifiedChain.chainId,
+          usdtAmount: 0,
+          reason: eligErr.message || 'Sell not allowed',
+          xitVerifiedOnChain: true,
+        });
+      }
       return res.status(400).json({ error: eligErr.message || 'Sell not allowed' });
     }
 
@@ -325,6 +346,15 @@ export async function sellTokens(req, res) {
         }
         return res.status(400).json({ error: 'Transaction hash already used' });
       }
+      await recordFailedSellStandalone({
+        userId: req.userId,
+        tokenAmount,
+        txHash,
+        chainId: verifiedChain?.chainId ?? null,
+        usdtAmount: quote?.usdtPayout ?? 0,
+        reason: chainErr.message || 'On-chain sell failed',
+        xitVerifiedOnChain: Boolean(verifiedChain),
+      });
       return res.status(400).json({ error: chainErr.message || 'On-chain sell failed' });
     }
 
@@ -335,6 +365,18 @@ export async function sellTokens(req, res) {
   } catch (err) {
     try { await conn.rollback(); } catch { /* ignore */ }
     console.error('Sell error:', err);
+    const bodyHash = req.body?.txHash ? String(req.body.txHash).trim() : '';
+    if (bodyHash && req.body?.tokenAmount > 0) {
+      await recordFailedSellStandalone({
+        userId: req.userId,
+        tokenAmount: Number(req.body.tokenAmount),
+        txHash: bodyHash,
+        chainId: null,
+        usdtAmount: 0,
+        reason: err.message || 'Server error during sale',
+        xitVerifiedOnChain: false,
+      });
+    }
     res.status(500).json({ error: 'Server error during sale' });
   } finally {
     conn.release();

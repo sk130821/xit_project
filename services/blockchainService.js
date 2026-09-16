@@ -195,8 +195,17 @@ export async function verifyBuyTransaction(conn, txHash, expectedPaymentAmount, 
     throw new Error(`Wrong chain. Expected ${config.chainId}, got ${network.chainId}`);
   }
 
-  const [existing] = await conn.query('SELECT id FROM transactions WHERE tx_hash = ?', [txHash]);
-  if (existing.length > 0) throw new Error('Transaction hash already used');
+  const [existing] = await conn.query(
+    'SELECT id, type, on_chain_status FROM transactions WHERE tx_hash = ? LIMIT 1',
+    [txHash]
+  );
+  if (existing.length > 0) {
+    const row = existing[0];
+    const retryBuy = row.type === 'buy' && row.on_chain_status === 'failed';
+    if (!retryBuy) {
+      throw new Error('Transaction hash already used');
+    }
+  }
 
   const treasury = config.adminTreasuryWallet.toLowerCase();
   const expectedWei = ethers.parseUnits(expectedPaymentAmount.toFixed(8), config.paymentDecimals);
@@ -300,8 +309,18 @@ export async function verifySellTokenTransfer(conn, txHash, expectedTokenAmount,
     throw new Error(`Wrong chain. Expected ${config.chainId}, got ${network.chainId}`);
   }
 
-  const [existing] = await conn.query('SELECT id FROM transactions WHERE tx_hash = ?', [txHash]);
-  if (existing.length > 0) throw new Error('Transaction hash already used');
+  const [existing] = await conn.query(
+    'SELECT id, type, on_chain_status FROM transactions WHERE tx_hash = ? LIMIT 1',
+    [txHash]
+  );
+  if (existing.length > 0) {
+    const row = existing[0];
+    const retrySell =
+      row.type === 'sell' && (row.on_chain_status === 'failed' || row.on_chain_status === 'pending');
+    if (!retrySell) {
+      throw new Error('Transaction hash already used');
+    }
+  }
 
   try {
     const [existingOrders] = await conn.query('SELECT id FROM sell_orders WHERE xit_tx_hash = ?', [txHash]);

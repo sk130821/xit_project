@@ -9,6 +9,7 @@ import {
 } from '../services/blockchainService.js';
 import { getSetting, distributeReferralBonus } from '../services/incomeService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
+import { recordFailedBuyStandalone, upgradeFailedBuyToSuccess } from '../services/tradeFailureService.js';
 import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
 import { computePlanOnlyMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
 
@@ -146,14 +147,31 @@ export async function verifyAndBuy(req, res) {
 
     const user = users[0];
     const wasInactive = !user.is_active;
+    const usdtTxHash = String(txHash).trim();
 
     const paymentAmount = tokenAmount * config.tokenPrice;
-    const { chainId, payerAddress } = await verifyBuyTransaction(
-      conn,
-      String(txHash).trim(),
-      paymentAmount,
-      user.wallet_address
-    );
+    let chainId;
+    let payerAddress;
+    try {
+      ({ chainId, payerAddress } = await verifyBuyTransaction(
+        conn,
+        usdtTxHash,
+        paymentAmount,
+        user.wallet_address
+      ));
+    } catch (verifyErr) {
+      await conn.rollback();
+      await recordFailedBuyStandalone({
+        userId: req.userId,
+        tokenAmount,
+        planType,
+        txHash: usdtTxHash,
+        chainId: null,
+        paymentSymbol: config.paymentTokenSymbol,
+        reason: verifyErr.message || 'USDT verification failed',
+      });
+      return res.status(400).json({ error: verifyErr.message || 'Failed to verify USDT payment' });
+    }
 
     // USDT payer is source of truth — sync account wallet + deliver XIT there
     const deliverTo = payerAddress;
@@ -183,10 +201,19 @@ export async function verifyAndBuy(req, res) {
       tokenPayoutTxHash = tokenPayout.txHash;
     } catch (payoutErr) {
       await conn.rollback();
+      await recordFailedBuyStandalone({
+        userId: req.userId,
+        tokenAmount,
+        planType,
+        txHash: usdtTxHash,
+        chainId,
+        paymentSymbol: config.paymentTokenSymbol,
+        reason: `XIT delivery failed: ${payoutErr.message}`,
+      });
       return res.status(400).json({
-        error: `XIT delivery failed: ${payoutErr.message}. USDT was received. Use Complete purchase with this tx hash after funding payout wallet: ${txHash}`,
+        error: `XIT delivery failed: ${payoutErr.message}. USDT was received. Use Complete purchase with this tx hash after funding payout wallet: ${usdtTxHash}`,
         code: 'XIT_DELIVERY_FAILED',
-        txHash,
+        txHash: usdtTxHash,
         payerAddress: deliverTo,
       });
     }
@@ -201,19 +228,32 @@ export async function verifyAndBuy(req, res) {
       skipTransaction: true,
     });
 
-    await conn.query(
-      'INSERT INTO transactions (user_id, type, amount, description, tx_hash, chain_id, investment_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [
-        req.userId,
-        'buy',
-        tokenAmount,
-        `Buy & Invest — ${planType} plan (${config.paymentTokenSymbol}). XIT payout: ${tokenPayoutTxHash}`,
-        String(txHash).trim(),
-        chainId,
-        investment.investmentId,
-        'confirmed',
-      ]
+    const buyDescription = `Buy & Invest — ${planType} plan (${config.paymentTokenSymbol}). XIT payout: ${tokenPayoutTxHash}`;
+    const [failedBuy] = await conn.query(
+      "SELECT id FROM transactions WHERE tx_hash = ? AND type = 'buy' AND on_chain_status = 'failed' LIMIT 1",
+      [usdtTxHash]
     );
+    if (failedBuy.length > 0) {
+      await upgradeFailedBuyToSuccess(conn, usdtTxHash, {
+        description: buyDescription,
+        investmentId: investment.investmentId,
+        chainId,
+      });
+    } else {
+      await conn.query(
+        'INSERT INTO transactions (user_id, type, amount, description, tx_hash, chain_id, investment_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          req.userId,
+          'buy',
+          tokenAmount,
+          buyDescription,
+          usdtTxHash,
+          chainId,
+          investment.investmentId,
+          'confirmed',
+        ]
+      );
+    }
 
     const referralBonus = investment.incomeEligible
       ? await distributeReferralBonus(conn, req.userId, tokenAmount)
@@ -236,6 +276,18 @@ export async function verifyAndBuy(req, res) {
   } catch (err) {
     await conn.rollback();
     console.error('Verify buy error:', err);
+    const bodyHash = req.body?.txHash ? String(req.body.txHash).trim() : '';
+    if (bodyHash && /^0x[a-fA-F0-9]{64}$/.test(bodyHash) && req.body?.tokenAmount > 0) {
+      await recordFailedBuyStandalone({
+        userId: req.userId,
+        tokenAmount: Number(req.body.tokenAmount),
+        planType: req.body.planType,
+        txHash: bodyHash,
+        chainId: null,
+        paymentSymbol: null,
+        reason: err.message || 'Buy failed',
+      });
+    }
     res.status(400).json({ error: err.message || 'Failed to verify transaction' });
   } finally {
     conn.release();
