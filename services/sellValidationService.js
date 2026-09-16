@@ -58,12 +58,22 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
     user.xit_balance = xitBalance;
   }
 
+  let onChainBalance = null;
+  if (chainMode && user.wallet_address) {
+    onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
+  }
+
+  const walletBasis = chainMode && onChainBalance != null ? onChainBalance : xitBalance;
+  const planSubtract = chainMode ? sellableFromInvestments : 0;
+  const lockedSubtract = chainMode ? planLocked : 0;
   const walletCaps = await computeWalletIncomeSellableCaps(
     conn,
     userId,
-    xitBalance,
+    walletBasis,
     lockRoiHeld,
-    flexibleRoi
+    flexibleRoi,
+    planSubtract,
+    lockedSubtract
   );
 
   let totalSellable;
@@ -75,11 +85,6 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
   let flexRoiCap = 0;
   let planCap = sellableFromInvestments;
   const targetInvestmentId = investmentId ? Number(investmentId) : null;
-
-  let onChainBalance = null;
-  if (chainMode && user.wallet_address) {
-    onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
-  }
 
   if (targetInvestmentId) {
     const [targetInvs] = await conn.query(

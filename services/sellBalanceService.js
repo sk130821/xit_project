@@ -77,7 +77,12 @@ export async function getInvestmentBalanceStats(conn, userId) {
   const today = getISTDateString();
   const [rows] = await conn.query(
     `SELECT
-      COALESCE(SUM(sellable_amount), 0) AS plan_sellable,
+      COALESCE(SUM(
+        CASE
+          WHEN plan_type IN ('lock', 'flexible_lock') AND status = 'active' THEN 0
+          ELSE sellable_amount
+        END
+      ), 0) AS plan_sellable,
       COALESCE(SUM(CASE WHEN status = 'active' THEN locked_amount ELSE 0 END), 0) AS plan_locked,
       COALESCE(SUM(${lockRoiHeldCaseSql()}), 0) AS lock_roi_held,
       COALESCE(SUM(CASE WHEN plan_type = 'flexible' THEN roi_received ELSE 0 END), 0) AS flexible_roi
@@ -122,8 +127,22 @@ export function computeMemberSellable(walletBalance, planSellable, planLocked, l
 }
 
 /** Partition wallet into referral/level/… vs flexible ROI (both exclude lock_roi_held). */
-export function computeWalletIncomeCaps(walletBalance, lockRoiHeld, flexibleRoi, ledgerIncomeTotal = null) {
-  const fromWallet = roundXit(Math.max(0, (Number(walletBalance) || 0) - (Number(lockRoiHeld) || 0)));
+export function computeWalletIncomeCaps(
+  walletBalance,
+  lockRoiHeld,
+  flexibleRoi,
+  ledgerIncomeTotal = null,
+  subtractPlanSellable = 0,
+  subtractPlanLocked = 0
+) {
+  const planOffset = roundXit(Number(subtractPlanSellable) || 0);
+  const lockedOffset = roundXit(Number(subtractPlanLocked) || 0);
+  const fromWallet = roundXit(
+    Math.max(
+      0,
+      (Number(walletBalance) || 0) - (Number(lockRoiHeld) || 0) - planOffset - lockedOffset
+    )
+  );
   const flexTracked = roundXit(Number(flexibleRoi) || 0);
   const ledger = ledgerIncomeTotal != null ? roundXit(Number(ledgerIncomeTotal)) : null;
   const walletSellable = ledger != null ? roundXit(Math.max(fromWallet, ledger)) : fromWallet;
@@ -147,9 +166,24 @@ export async function sumLegacyWalletIncomeLedger(conn, userId, flexibleRoi) {
   };
 }
 
-export async function computeWalletIncomeSellableCaps(conn, userId, xitBalance, lockRoiHeld, flexibleRoi) {
+export async function computeWalletIncomeSellableCaps(
+  conn,
+  userId,
+  xitBalance,
+  lockRoiHeld,
+  flexibleRoi,
+  subtractPlanSellable = 0,
+  subtractPlanLocked = 0
+) {
   const { bonusTotal, ledgerIncomeTotal } = await sumLegacyWalletIncomeLedger(conn, userId, flexibleRoi);
-  const caps = computeWalletIncomeCaps(xitBalance, lockRoiHeld, flexibleRoi, ledgerIncomeTotal);
+  const caps = computeWalletIncomeCaps(
+    xitBalance,
+    lockRoiHeld,
+    flexibleRoi,
+    ledgerIncomeTotal,
+    subtractPlanSellable,
+    subtractPlanLocked
+  );
   return { ...caps, bonusTotal, ledgerIncomeTotal };
 }
 
@@ -173,10 +207,14 @@ export async function reconcileLegacyXitBalance(conn, userId, lockRoiHeld, flexi
   return current;
 }
 
-export function memberSellableViewFromCaps(planSellable, caps) {
+export function memberSellableViewFromCaps(planSellable, caps, onChainCap = null) {
   const plan = roundXit(Number(planSellable) || 0);
+  let totalSellable = roundXit(plan + caps.walletSellable);
+  if (onChainCap != null) {
+    totalSellable = roundXit(Math.min(Number(onChainCap) || 0, totalSellable));
+  }
   return {
-    totalSellable: roundXit(plan + caps.walletSellable),
+    totalSellable,
     incomeSellable: caps.walletSellable,
     otherIncomeSellable: caps.otherIncomeCap,
     flexibleRoiSellable: caps.flexRoiCap,
@@ -206,18 +244,22 @@ export async function computeChainMemberSellableForUser(
   userId,
   onChainBalance,
   planSellable,
-  _planLocked,
+  planLocked,
   lockRoiHeld,
   flexibleRoi
 ) {
+  const plan = roundXit(Number(planSellable) || 0);
+  const locked = roundXit(Number(planLocked) || 0);
   const caps = await computeWalletIncomeSellableCaps(
     conn,
     userId,
     onChainBalance,
     lockRoiHeld,
-    flexibleRoi
+    flexibleRoi,
+    plan,
+    locked
   );
-  return memberSellableViewFromCaps(planSellable, caps);
+  return memberSellableViewFromCaps(planSellable, caps, onChainBalance);
 }
 
 /** @deprecated Use computeMemberFlexAwareSellable */
