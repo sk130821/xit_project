@@ -6,7 +6,7 @@ import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
 import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
 import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
-import { computePlanOnlyMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+import { computeMemberFlexAwareSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
 
 const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
@@ -502,12 +502,14 @@ export async function getMe(req, res) {
     let planSellable = 0;
     let planLocked = 0;
     let lockRoiHeld = 0;
+    let flexibleRoiSellable = 0;
 
     try {
       const balanceStats = await getInvestmentBalanceStats(conn, req.userId);
       planSellable = balanceStats.planSellable;
       planLocked = balanceStats.planLocked;
       lockRoiHeld = balanceStats.lockRoiHeld;
+      flexibleRoiSellable = balanceStats.flexibleRoi;
 
       const config = await getBlockchainConfig(conn);
       platformMode = config.platformMode;
@@ -516,7 +518,7 @@ export async function getMe(req, res) {
       if (chainMode && user.wallet_address) {
         onChainXitBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
       }
-      totalSellable = computePlanOnlyMemberSellable(planSellable).totalSellable;
+      totalSellable = computeMemberFlexAwareSellable(planSellable, flexibleRoiSellable).totalSellable;
     } finally {
       conn.release();
     }
@@ -537,6 +539,7 @@ export async function getMe(req, res) {
       plan_sellable: planSellable,
       plan_locked: planLocked,
       lock_roi_held: lockRoiHeld,
+      flexible_roi_sellable: flexibleRoiSellable,
       platform_mode: platformMode,
       on_chain_xit_balance: onChainXitBalance,
       total_sellable: totalSellable,

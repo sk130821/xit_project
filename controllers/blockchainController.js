@@ -11,7 +11,7 @@ import { getSetting, distributeReferralBonus } from '../services/incomeService.j
 import { createInvestmentForUser } from '../services/investmentService.js';
 import { recordFailedBuyStandalone, upgradeFailedBuyToSuccess } from '../services/tradeFailureService.js';
 import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
-import { computePlanOnlyMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+import { computeMemberFlexAwareSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
 
 export async function getConfig(req, res) {
   try {
@@ -75,8 +75,11 @@ export async function getMemberWalletBalance(req, res) {
     }
 
     const walletAddress = users[0].wallet_address;
-    const { planSellable, planLocked, lockRoiHeld } = await getInvestmentBalanceStats(conn, req.userId);
-    const sellableView = computePlanOnlyMemberSellable(planSellable);
+    const { planSellable, planLocked, lockRoiHeld, flexibleRoi } = await getInvestmentBalanceStats(
+      conn,
+      req.userId
+    );
+    const sellableView = computeMemberFlexAwareSellable(planSellable, flexibleRoi);
 
     if (!walletAddress) {
       return res.json({

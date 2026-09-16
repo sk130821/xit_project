@@ -8,7 +8,8 @@ import {
 } from './blockchainService.js';
 import { getUserOnChainXitBalance } from './tokenPayoutService.js';
 import {
-  computePlanOnlyMemberSellable,
+  allocateSellAmount,
+  computeMemberFlexAwareSellable,
   getInvestmentBalanceStats,
   investmentAllowsSell,
 } from './sellBalanceService.js';
@@ -39,7 +40,13 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
 
   const xitBalance = Number(user.xit_balance || 0);
   const balanceStats = await getInvestmentBalanceStats(conn, userId);
-  const { planSellable: sellableFromInvestments, planLocked, lockRoiHeld } = balanceStats;
+  const {
+    planSellable: sellableFromInvestments,
+    planLocked,
+    lockRoiHeld,
+    flexibleRoi,
+  } = balanceStats;
+  const sellableView = computeMemberFlexAwareSellable(sellableFromInvestments, flexibleRoi);
 
   const config = await getBlockchainConfig(conn);
   const chainMode = isBlockchainMode(config.platformMode);
@@ -51,7 +58,7 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
 
   if (targetInvestmentId) {
     const [targetInvs] = await conn.query(
-      `SELECT id, sellable_amount, plan_type, status, end_date FROM investments WHERE id = ? AND user_id = ?${lockSql}`,
+      `SELECT id, sellable_amount, roi_received, plan_type, status, end_date FROM investments WHERE id = ? AND user_id = ?${lockSql}`,
       [targetInvestmentId, userId]
     );
     if (targetInvs.length === 0) {
@@ -62,15 +69,22 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
       throw new Error('This investment has no sellable tokens');
     }
     const invSellable = Number(targetInv.sellable_amount);
-    if (invSellable <= 0) {
+    const invFlexRoi =
+      targetInv.plan_type === 'flexible' ? Number(targetInv.roi_received || 0) : 0;
+    const invTotalSellable = invSellable + invFlexRoi;
+    if (invTotalSellable <= 0) {
       throw new Error('This investment has no sellable tokens');
     }
-    if (tokenAmount > invSellable) {
-      throw new Error(`Maximum sellable from this investment is ${invSellable} XIT`);
+    if (tokenAmount > invTotalSellable) {
+      throw new Error(`Maximum sellable from this investment is ${invTotalSellable} XIT`);
     }
 
-    amountFromInvestments = tokenAmount;
-    totalSellable = invSellable;
+    ({ amountFromInvestments, amountFromXitBalance } = allocateSellAmount(
+      tokenAmount,
+      invSellable,
+      invFlexRoi
+    ));
+    totalSellable = invTotalSellable;
 
     if (chainMode) {
       if (!user.wallet_address) {
@@ -88,7 +102,7 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
       throw new Error('Link your MetaMask wallet before selling in blockchain mode');
     }
 
-    totalSellable = computePlanOnlyMemberSellable(sellableFromInvestments).totalSellable;
+    totalSellable = sellableView.totalSellable;
 
     if (tokenAmount > totalSellable) {
       throw new Error(`Maximum sellable from your plan is ${totalSellable} XIT`);
@@ -99,17 +113,27 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
       throw new Error('Insufficient XIT balance in your wallet');
     }
 
-    amountFromInvestments = tokenAmount;
-    amountFromXitBalance = 0;
+    ({ amountFromInvestments, amountFromXitBalance } = allocateSellAmount(
+      tokenAmount,
+      sellableFromInvestments,
+      flexibleRoi
+    ));
   } else {
-    totalSellable = computePlanOnlyMemberSellable(sellableFromInvestments).totalSellable;
+    totalSellable = sellableView.totalSellable;
 
     if (tokenAmount > totalSellable) {
       throw new Error('Insufficient sellable XIT tokens');
     }
 
-    amountFromInvestments = tokenAmount;
-    amountFromXitBalance = 0;
+    ({ amountFromInvestments, amountFromXitBalance } = allocateSellAmount(
+      tokenAmount,
+      sellableFromInvestments,
+      flexibleRoi
+    ));
+
+    if (amountFromXitBalance > xitBalance) {
+      throw new Error('Insufficient XIT balance for flexible ROI portion');
+    }
   }
 
   const adminRate = parseFloat(await getSetting(conn, 'admin_charge_percent', '10'));
@@ -126,6 +150,10 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
     amountFromXitBalance,
     amountFromInvestments,
     targetInvestmentId,
+    flexRoiInvestmentId:
+      targetInvestmentId && amountFromXitBalance > 0 ? targetInvestmentId : null,
+    flexibleRoi,
+    planSellable: sellableFromInvestments,
     adminCharge,
     netXit,
     usdtPayout,

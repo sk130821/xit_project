@@ -1,6 +1,6 @@
 import { pool } from '../db.js';
 import { confirmPayoutTransaction, sendPaymentPayout } from './blockchainService.js';
-import { deductInvestmentSellable } from './sellBalanceService.js';
+import { deductFlexibleRoiReceived, deductInvestmentSellable } from './sellBalanceService.js';
 
 const OPEN_STATUSES = ['xit_received', 'payout_failed', 'payout_submitted'];
 
@@ -71,9 +71,14 @@ export async function applySellLedger(conn, {
   amountFromInvestments,
   targetInvestmentId,
   chainMode,
+  flexRoiInvestmentId = null,
 }) {
   if (!chainMode && amountFromXitBalance > 0) {
     await conn.query('UPDATE users SET xit_balance = xit_balance - ? WHERE id = ?', [amountFromXitBalance, userId]);
+  }
+
+  if (amountFromXitBalance > 0) {
+    await deductFlexibleRoiReceived(conn, userId, amountFromXitBalance, flexRoiInvestmentId);
   }
 
   if (amountFromInvestments > 0) {
@@ -139,6 +144,7 @@ export async function persistXitReceivedSell(conn, payload) {
     amountFromXitBalance: payload.amountFromXitBalance,
     amountFromInvestments: payload.amountFromInvestments,
     targetInvestmentId: payload.targetInvestmentId,
+    flexRoiInvestmentId: payload.flexRoiInvestmentId ?? null,
     chainMode: true,
   });
 

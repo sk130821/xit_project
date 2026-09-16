@@ -274,6 +274,7 @@ export async function sellTokens(req, res) {
         amountFromXitBalance: quote.amountFromXitBalance,
         amountFromInvestments: quote.amountFromInvestments,
         targetInvestmentId: quote.targetInvestmentId,
+        flexRoiInvestmentId: quote.flexRoiInvestmentId ?? null,
         chainMode: false,
       });
       await conn.query(
@@ -331,6 +332,7 @@ export async function sellTokens(req, res) {
         amountFromXitBalance: quote.amountFromXitBalance,
         amountFromInvestments: quote.amountFromInvestments,
         targetInvestmentId: quote.targetInvestmentId,
+        flexRoiInvestmentId: quote.flexRoiInvestmentId ?? null,
         xitTxHash: txHash,
         chainId: verified.chainId,
       });

@@ -4,7 +4,7 @@ import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
 import { creditUserXit, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
 import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
-import { computePlanOnlyMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+import { computeMemberFlexAwareSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
 import { distributeReferralBonus } from '../services/incomeService.js';
 import { applySellFailedCompensation } from '../services/sellCompensationService.js';
@@ -260,7 +260,10 @@ export async function getUserDetail(req, res) {
       totalSellable: 0,
     };
 
-    const planView = computePlanOnlyMemberSellable(balanceStats.planSellable);
+    const planView = computeMemberFlexAwareSellable(
+      balanceStats.planSellable,
+      balanceStats.flexibleRoi
+    );
     let onChainXit = null;
     if (chainMode && u.wallet_address) {
       onChainXit = await getUserOnChainXitBalance(conn, u.wallet_address);

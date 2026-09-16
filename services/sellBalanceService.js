@@ -2,7 +2,7 @@
  * Sellable balance rules:
  * - Flexible plan: sellable_amount (80% slice) while active; ROI base = token_amount (principal)
  * - Lock / Flexible Lock ROI: non-sellable until 4X complete AND lock end_date; held in lock_roi_held
- * - Other wallet income (flex ROI, level bonus): sellable unless held by lock ROI
+ * - Flexible ROI (roi_received on flexible plans): sellable with plan slice; lock / flex-lock ROI is not
  *
  * walletBalance meaning:
  * - Blockchain (fullInventory): on-chain XIT already includes plan tokens + income
@@ -69,7 +69,8 @@ export async function getInvestmentBalanceStats(conn, userId) {
     `SELECT
       COALESCE(SUM(sellable_amount), 0) AS plan_sellable,
       COALESCE(SUM(CASE WHEN status = 'active' THEN locked_amount ELSE 0 END), 0) AS plan_locked,
-      COALESCE(SUM(${lockRoiHeldCaseSql()}), 0) AS lock_roi_held
+      COALESCE(SUM(${lockRoiHeldCaseSql()}), 0) AS lock_roi_held,
+      COALESCE(SUM(CASE WHEN plan_type = 'flexible' THEN roi_received ELSE 0 END), 0) AS flexible_roi
      FROM investments WHERE user_id = ?`,
     [today, userId]
   );
@@ -78,6 +79,7 @@ export async function getInvestmentBalanceStats(conn, userId) {
     planSellable: Number(rows[0].plan_sellable),
     planLocked: Number(rows[0].plan_locked),
     lockRoiHeld: Number(rows[0].lock_roi_held),
+    flexibleRoi: Number(rows[0].flexible_roi),
   };
 }
 
@@ -109,14 +111,75 @@ export function computeMemberSellable(walletBalance, planSellable, planLocked, l
   };
 }
 
-/** Member-facing sellable: plan slice only (flexible / matured lock sellable), not wallet−locks. */
-export function computePlanOnlyMemberSellable(planSellable) {
-  const sellable = roundXit(Number(planSellable) || 0);
+/** Member-facing sellable: plan sellable slices + flexible-plan ROI only (not lock / flex-lock ROI). */
+export function computeMemberFlexAwareSellable(planSellable, flexibleRoi) {
+  const plan = roundXit(Number(planSellable) || 0);
+  const flexRoi = roundXit(Number(flexibleRoi) || 0);
   return {
-    totalSellable: sellable,
-    incomeSellable: 0,
-    planSellable: sellable,
+    totalSellable: roundXit(plan + flexRoi),
+    incomeSellable: flexRoi,
+    planSellable: plan,
   };
+}
+
+/** @deprecated Use computeMemberFlexAwareSellable */
+export function computePlanOnlyMemberSellable(planSellable) {
+  return computeMemberFlexAwareSellable(planSellable, 0);
+}
+
+/** Split sell amount: flexible ROI first (earnings), then plan sellable slice. */
+export function allocateSellAmount(tokenAmount, planSellableCap, flexibleRoiCap) {
+  const amount = Number(tokenAmount) || 0;
+  const planCap = Math.max(0, Number(planSellableCap) || 0);
+  const roiCap = Math.max(0, Number(flexibleRoiCap) || 0);
+  const fromRoi = roundXit(Math.min(amount, roiCap));
+  const fromPlan = roundXit(Math.min(Math.max(0, amount - fromRoi), planCap));
+  return { amountFromInvestments: fromPlan, amountFromXitBalance: fromRoi };
+}
+
+/** Reduce flexible plan ROI counters when member sells credited ROI (FIFO across flexible rows). */
+export async function deductFlexibleRoiReceived(conn, userId, amount, specificInvestmentId = null) {
+  let remainder = roundXit(Number(amount) || 0);
+  if (remainder <= 0) return;
+
+  if (specificInvestmentId) {
+    const id = Number(specificInvestmentId);
+    const [rows] = await conn.query(
+      `SELECT id, roi_received FROM investments
+       WHERE id = ? AND user_id = ? AND plan_type = 'flexible' FOR UPDATE`,
+      [id, userId]
+    );
+    if (rows.length === 0) throw new Error('Flexible investment not found for ROI deduction');
+    const available = roundXit(Number(rows[0].roi_received));
+    if (remainder > available + 1e-8) {
+      throw new Error('Insufficient flexible ROI on this investment');
+    }
+    await conn.query(
+      'UPDATE investments SET roi_received = GREATEST(0, roi_received - ?) WHERE id = ? AND user_id = ?',
+      [remainder, id, userId]
+    );
+    return;
+  }
+
+  while (remainder > 1e-8) {
+    const [invs] = await conn.query(
+      `SELECT id, roi_received FROM investments
+       WHERE user_id = ? AND plan_type = 'flexible' AND roi_received > 0
+       ORDER BY created_at LIMIT 1 FOR UPDATE`,
+      [userId]
+    );
+    if (invs.length === 0) {
+      throw new Error('Insufficient flexible ROI to complete sell');
+    }
+    const inv = invs[0];
+    const available = roundXit(Number(inv.roi_received));
+    const slice = roundXit(Math.min(remainder, available));
+    await conn.query(
+      'UPDATE investments SET roi_received = GREATEST(0, roi_received - ?) WHERE id = ? AND user_id = ?',
+      [slice, inv.id, userId]
+    );
+    remainder = roundXit(remainder - slice);
+  }
 }
 
 export function investmentAllowsSell(inv) {
