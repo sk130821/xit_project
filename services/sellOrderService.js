@@ -1,6 +1,13 @@
 import { pool } from '../db.js';
 import { confirmPayoutTransaction, sendPaymentPayout } from './blockchainService.js';
-import { deductFlexibleRoiReceived, deductInvestmentSellable } from './sellBalanceService.js';
+import {
+  deductFlexibleRoiReceived,
+  deductInvestmentSellable,
+} from './sellBalanceService.js';
+
+function roundXit(value) {
+  return Math.round((Number(value) || 0) * 1e8) / 1e8;
+}
 
 const OPEN_STATUSES = ['xit_received', 'payout_failed', 'payout_submitted'];
 
@@ -68,17 +75,26 @@ export async function findOpenSellOrderForUser(conn, userId, tokenAmount) {
 export async function applySellLedger(conn, {
   userId,
   amountFromXitBalance,
+  amountFromOtherIncome,
+  amountFromFlexRoi,
   amountFromInvestments,
   targetInvestmentId,
   chainMode,
   flexRoiInvestmentId = null,
 }) {
-  if (!chainMode && amountFromXitBalance > 0) {
-    await conn.query('UPDATE users SET xit_balance = xit_balance - ? WHERE id = ?', [amountFromXitBalance, userId]);
+  const walletTotal =
+    amountFromOtherIncome != null || amountFromFlexRoi != null
+      ? roundXit((Number(amountFromOtherIncome) || 0) + (Number(amountFromFlexRoi) || 0))
+      : roundXit(Number(amountFromXitBalance) || 0);
+  const flexRoiSlice =
+    amountFromFlexRoi != null ? roundXit(Number(amountFromFlexRoi) || 0) : walletTotal;
+
+  if (!chainMode && walletTotal > 0) {
+    await conn.query('UPDATE users SET xit_balance = xit_balance - ? WHERE id = ?', [walletTotal, userId]);
   }
 
-  if (amountFromXitBalance > 0) {
-    await deductFlexibleRoiReceived(conn, userId, amountFromXitBalance, flexRoiInvestmentId);
+  if (flexRoiSlice > 0) {
+    await deductFlexibleRoiReceived(conn, userId, flexRoiSlice, flexRoiInvestmentId);
   }
 
   if (amountFromInvestments > 0) {
@@ -142,6 +158,8 @@ export async function persistXitReceivedSell(conn, payload) {
   await applySellLedger(conn, {
     userId: payload.userId,
     amountFromXitBalance: payload.amountFromXitBalance,
+    amountFromOtherIncome: payload.amountFromOtherIncome,
+    amountFromFlexRoi: payload.amountFromFlexRoi,
     amountFromInvestments: payload.amountFromInvestments,
     targetInvestmentId: payload.targetInvestmentId,
     flexRoiInvestmentId: payload.flexRoiInvestmentId ?? null,

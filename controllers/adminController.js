@@ -4,7 +4,11 @@ import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
 import { creditUserXit, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
 import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
-import { computeMemberFlexAwareSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+import {
+  computeChainMemberSellableForUser,
+  computeDemoMemberSellable,
+  getInvestmentBalanceStats,
+} from '../services/sellBalanceService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
 import { distributeReferralBonus } from '../services/incomeService.js';
 import { applySellFailedCompensation } from '../services/sellCompensationService.js';
@@ -260,14 +264,29 @@ export async function getUserDetail(req, res) {
       totalSellable: 0,
     };
 
-    const planView = computeMemberFlexAwareSellable(
-      balanceStats.planSellable,
-      balanceStats.flexibleRoi
-    );
     let onChainXit = null;
     if (chainMode && u.wallet_address) {
       onChainXit = await getUserOnChainXitBalance(conn, u.wallet_address);
     }
+    const planView =
+      chainMode && onChainXit != null
+        ? await computeChainMemberSellableForUser(
+            conn,
+            userId,
+            onChainXit,
+            balanceStats.planSellable,
+            balanceStats.planLocked,
+            balanceStats.lockRoiHeld,
+            balanceStats.flexibleRoi
+          )
+        : await computeDemoMemberSellable(
+            conn,
+            userId,
+            balanceStats.planSellable,
+            balanceStats.flexibleRoi,
+            Number(u.xit_balance || 0),
+            balanceStats.lockRoiHeld
+          );
     sellBalance = {
       chainMode,
       onChainXit,
@@ -275,6 +294,8 @@ export async function getUserDetail(req, res) {
       planLocked: balanceStats.planLocked,
       lockRoiHeld: balanceStats.lockRoiHeld,
       incomeSellable: planView.incomeSellable,
+      otherIncomeSellable: planView.otherIncomeSellable,
+      flexibleRoiSellable: planView.flexibleRoiSellable,
       totalSellable: planView.totalSellable,
     };
 

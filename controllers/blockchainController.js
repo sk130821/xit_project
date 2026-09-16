@@ -11,7 +11,10 @@ import { getSetting, distributeReferralBonus } from '../services/incomeService.j
 import { createInvestmentForUser } from '../services/investmentService.js';
 import { recordFailedBuyStandalone, upgradeFailedBuyToSuccess } from '../services/tradeFailureService.js';
 import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
-import { computeMemberFlexAwareSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+import {
+  computeChainMemberSellableForUser,
+  getInvestmentBalanceStats,
+} from '../services/sellBalanceService.js';
 
 export async function getConfig(req, res) {
   try {
@@ -79,8 +82,6 @@ export async function getMemberWalletBalance(req, res) {
       conn,
       req.userId
     );
-    const sellableView = computeMemberFlexAwareSellable(planSellable, flexibleRoi);
-
     if (!walletAddress) {
       return res.json({
         chainMode: true,
@@ -88,11 +89,20 @@ export async function getMemberWalletBalance(req, res) {
         planSellable,
         planLocked,
         lockRoiHeld,
-        totalSellable: sellableView.totalSellable,
+        totalSellable: 0,
         incomeBalance: 0,
       });
     }
     const onChainXitBalance = await getUserOnChainXitBalance(conn, walletAddress);
+    const sellableView = await computeChainMemberSellableForUser(
+      conn,
+      req.userId,
+      onChainXitBalance,
+      planSellable,
+      planLocked,
+      lockRoiHeld,
+      flexibleRoi
+    );
 
     res.json({
       chainMode: true,
@@ -102,6 +112,8 @@ export async function getMemberWalletBalance(req, res) {
       planLocked,
       lockRoiHeld,
       incomeBalance: sellableView.incomeSellable,
+      otherIncomeSellable: sellableView.otherIncomeSellable,
+      flexibleRoiSellable: sellableView.flexibleRoiSellable,
       totalSellable: sellableView.totalSellable,
     });
   } catch (err) {

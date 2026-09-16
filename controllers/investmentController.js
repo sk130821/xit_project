@@ -272,6 +272,8 @@ export async function sellTokens(req, res) {
       await applySellLedger(conn, {
         userId: req.userId,
         amountFromXitBalance: quote.amountFromXitBalance,
+        amountFromOtherIncome: quote.amountFromOtherIncome,
+        amountFromFlexRoi: quote.amountFromFlexRoi,
         amountFromInvestments: quote.amountFromInvestments,
         targetInvestmentId: quote.targetInvestmentId,
         flexRoiInvestmentId: quote.flexRoiInvestmentId ?? null,
@@ -330,6 +332,8 @@ export async function sellTokens(req, res) {
         usdtPayout: quote.usdtPayout,
         paymentSymbol: quote.paymentSymbol,
         amountFromXitBalance: quote.amountFromXitBalance,
+        amountFromOtherIncome: quote.amountFromOtherIncome,
+        amountFromFlexRoi: quote.amountFromFlexRoi,
         amountFromInvestments: quote.amountFromInvestments,
         targetInvestmentId: quote.targetInvestmentId,
         flexRoiInvestmentId: quote.flexRoiInvestmentId ?? null,

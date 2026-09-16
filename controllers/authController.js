@@ -6,7 +6,12 @@ import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
 import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
 import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
-import { computeMemberFlexAwareSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+import {
+  computeChainMemberSellableForUser,
+  computeDemoMemberSellable,
+  getInvestmentBalanceStats,
+  reconcileLegacyXitBalance,
+} from '../services/sellBalanceService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
 
 const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
@@ -503,6 +508,9 @@ export async function getMe(req, res) {
     let planLocked = 0;
     let lockRoiHeld = 0;
     let flexibleRoiSellable = 0;
+    let incomeSellable = null;
+    let walletIncomeSellable = null;
+    let xitBalanceOut = Number(user.xit_balance || 0);
 
     try {
       const balanceStats = await getInvestmentBalanceStats(conn, req.userId);
@@ -517,8 +525,38 @@ export async function getMe(req, res) {
 
       if (chainMode && user.wallet_address) {
         onChainXitBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
+        const chainView = await computeChainMemberSellableForUser(
+          conn,
+          req.userId,
+          onChainXitBalance,
+          planSellable,
+          planLocked,
+          lockRoiHeld,
+          flexibleRoiSellable
+        );
+        totalSellable = chainView.totalSellable;
+        incomeSellable = chainView.incomeSellable;
+        walletIncomeSellable = chainView.incomeSellable;
+      } else {
+        const syncedXit = await reconcileLegacyXitBalance(
+          conn,
+          req.userId,
+          lockRoiHeld,
+          flexibleRoiSellable
+        );
+        const demoView = await computeDemoMemberSellable(
+          conn,
+          req.userId,
+          planSellable,
+          flexibleRoiSellable,
+          syncedXit,
+          lockRoiHeld
+        );
+        totalSellable = demoView.totalSellable;
+        incomeSellable = demoView.incomeSellable;
+        walletIncomeSellable = demoView.incomeSellable;
+        xitBalanceOut = syncedXit;
       }
-      totalSellable = computeMemberFlexAwareSellable(planSellable, flexibleRoiSellable).totalSellable;
     } finally {
       conn.release();
     }
@@ -532,7 +570,7 @@ export async function getMe(req, res) {
       referral_code: user.referral_code,
       sponsor_id: user.sponsor_id,
       wallet_balance: Number(user.wallet_balance),
-      xit_balance: Number(user.xit_balance || 0),
+      xit_balance: xitBalanceOut,
       total_earned: Number(user.total_earned),
       total_invested: Number(user.total_invested),
       total_purchased: Number(user.total_purchased || 0),
@@ -540,6 +578,8 @@ export async function getMe(req, res) {
       plan_locked: planLocked,
       lock_roi_held: lockRoiHeld,
       flexible_roi_sellable: flexibleRoiSellable,
+      income_sellable: incomeSellable,
+      wallet_income_sellable: walletIncomeSellable,
       platform_mode: platformMode,
       on_chain_xit_balance: onChainXitBalance,
       total_sellable: totalSellable,
