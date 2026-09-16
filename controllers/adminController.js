@@ -5,6 +5,8 @@ import { getSetting } from '../services/incomeService.js';
 import { creditUserXit, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
 import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
 import { computeMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+import { createInvestmentForUser } from '../services/investmentService.js';
+import { distributeReferralBonus } from '../services/incomeService.js';
 
 const COMPENSATION_KINDS = new Set(['sell_failed', 'buy_failed', 'general']);
 
@@ -19,7 +21,7 @@ function buildGrantDescription({ compensationKind, note, refTxHash, adminEmail }
     return `${d} By ${adminEmail}`;
   }
   if (compensationKind === 'buy_failed') {
-    let d = 'Compensation — buy failed (USDT paid, XIT not received). Wallet credit only; no new plan lock.';
+    let d = 'Compensation — buy failed (USDT paid, XIT not received). Same as purchase (plan + XIT), no admin USDT.';
     if (ref) d += ` Ref: ${ref}.`;
     if (noteText) d += ` ${noteText}.`;
     return `${d} By ${adminEmail}`;
@@ -416,7 +418,7 @@ export async function changeUserPassword(req, res) {
 export async function grantXit(req, res) {
   const conn = await pool.getConnection();
   try {
-    const { targetId, amount, note, compensationKind, refTxHash } = req.body;
+    const { targetId, amount, note, compensationKind, refTxHash, planType } = req.body;
     const tokenAmount = Number(amount);
     const kind = compensationKind ? String(compensationKind) : 'general';
     if (!COMPENSATION_KINDS.has(kind)) {
@@ -425,6 +427,12 @@ export async function grantXit(req, res) {
 
     if (!targetId || !Number.isFinite(tokenAmount) || tokenAmount <= 0) {
       return res.status(400).json({ error: 'targetId and a positive amount are required' });
+    }
+
+    if (kind === 'buy_failed') {
+      if (!planType || !['lock', 'flexible'].includes(String(planType))) {
+        return res.status(400).json({ error: 'Select a plan for buy failed: lock or flexible' });
+      }
     }
 
     const maxGrant = parseFloat(await getSetting(conn, 'admin_grant_max_xit', '1000000'));
@@ -444,12 +452,10 @@ export async function grantXit(req, res) {
     }
 
     const user = users[0];
-    if (!user.is_active) {
+    if (kind !== 'buy_failed' && !user.is_active) {
       await conn.rollback();
       return res.status(400).json({ error: 'Member account is inactive. Activate the account first.' });
     }
-
-    const payout = await creditUserXit(conn, targetId, tokenAmount, { skipTotalEarned: true });
 
     const description = buildGrantDescription({
       compensationKind: kind,
@@ -457,6 +463,84 @@ export async function grantXit(req, res) {
       refTxHash,
       adminEmail: req.adminEmail || 'admin',
     });
+
+    if (kind === 'buy_failed') {
+      const resolvedPlan = String(planType);
+      const config = await getBlockchainConfig(conn);
+      const chainMode = isBlockchainMode(config.platformMode);
+
+      let payout = {
+        credited: 0,
+        txHash: null,
+        chainId: null,
+        onChainStatus: 'demo',
+        chainMode: false,
+      };
+
+      if (chainMode) {
+        payout = await creditUserXit(conn, targetId, tokenAmount, { skipTotalEarned: true });
+      }
+
+      await conn.query(
+        'UPDATE users SET total_purchased = total_purchased + ?, is_active = 1 WHERE id = ?',
+        [tokenAmount, targetId]
+      );
+
+      const investment = await createInvestmentForUser(conn, targetId, tokenAmount, resolvedPlan, {
+        skipWalletDeduction: true,
+        skipTransaction: true,
+      });
+
+      const usdtRef = refTxHash ? String(refTxHash).trim().slice(0, 66) : null;
+      const buyDescription = `${description} — ${resolvedPlan} plan.${
+        payout.txHash ? ` XIT payout: ${payout.txHash}` : ' Demo plan only (no on-chain XIT).'
+      }`;
+
+      await conn.query(
+        'INSERT INTO transactions (user_id, type, amount, description, tx_hash, chain_id, investment_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          targetId,
+          'buy',
+          tokenAmount,
+          buyDescription,
+          usdtRef || payout.txHash,
+          payout.chainId,
+          investment.investmentId,
+          chainMode ? 'confirmed' : 'demo',
+        ]
+      );
+
+      const referralBonus = investment.incomeEligible
+        ? await distributeReferralBonus(conn, targetId, tokenAmount)
+        : 0;
+
+      await conn.commit();
+
+      return res.json({
+        success: true,
+        targetId: Number(targetId),
+        username: user.username,
+        amount: tokenAmount,
+        compensationKind: kind,
+        planType: resolvedPlan,
+        investment,
+        referralBonus,
+        credited: payout.credited,
+        chainMode: payout.chainMode,
+        txHash: payout.txHash,
+        chainId: payout.chainId,
+        onChainStatus: payout.onChainStatus,
+        walletAddress: user.wallet_address,
+        accountActivated: !user.is_active,
+      });
+    }
+
+    if (!user.is_active) {
+      await conn.rollback();
+      return res.status(400).json({ error: 'Member account is inactive. Activate the account first.' });
+    }
+
+    const payout = await creditUserXit(conn, targetId, tokenAmount, { skipTotalEarned: true });
 
     await conn.query(
       'INSERT INTO transactions (user_id, type, amount, description, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?)',
