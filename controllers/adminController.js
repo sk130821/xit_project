@@ -7,6 +7,7 @@ import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainSer
 import { computeMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
 import { createInvestmentForUser } from '../services/investmentService.js';
 import { distributeReferralBonus } from '../services/incomeService.js';
+import { applySellFailedCompensation } from '../services/sellCompensationService.js';
 
 const COMPENSATION_KINDS = new Set(['sell_failed', 'buy_failed', 'general']);
 
@@ -15,7 +16,7 @@ function buildGrantDescription({ compensationKind, note, refTxHash, adminEmail }
   const ref = refTxHash ? String(refTxHash).trim().slice(0, 66) : '';
 
   if (compensationKind === 'sell_failed') {
-    let d = 'Compensation — sell failed (XIT sent, USDT not received). Wallet credit only; plan hold unchanged.';
+    let d = 'Compensation — sell failed (XIT sent, USDT not received). Flexible/plan sellable restored; on-chain return only if sell tx ref provided.';
     if (ref) d += ` Ref: ${ref}.`;
     if (noteText) d += ` ${noteText}.`;
     return `${d} By ${adminEmail}`;
@@ -418,7 +419,7 @@ export async function changeUserPassword(req, res) {
 export async function grantXit(req, res) {
   const conn = await pool.getConnection();
   try {
-    const { targetId, amount, note, compensationKind, refTxHash, planType } = req.body;
+    const { targetId, amount, note, compensationKind, refTxHash, planType, investmentId } = req.body;
     const tokenAmount = Number(amount);
     const kind = compensationKind ? String(compensationKind) : 'general';
     if (!COMPENSATION_KINDS.has(kind)) {
@@ -532,6 +533,64 @@ export async function grantXit(req, res) {
         onChainStatus: payout.onChainStatus,
         walletAddress: user.wallet_address,
         accountActivated: !user.is_active,
+      });
+    }
+
+    if (kind === 'sell_failed') {
+      const restore = await applySellFailedCompensation(conn, {
+        userId: targetId,
+        tokenAmount,
+        refTxHash,
+        investmentId,
+      });
+
+      let payout = {
+        credited: 0,
+        txHash: null,
+        chainId: null,
+        onChainStatus: 'demo',
+        chainMode: restore.chainMode,
+      };
+
+      if (restore.chainMode && restore.onChainAmount > 0) {
+        payout = await creditUserXit(conn, targetId, restore.onChainAmount, { skipTotalEarned: true });
+      }
+
+      const txRef = refTxHash ? String(refTxHash).trim().slice(0, 66) : payout.txHash;
+
+      await conn.query(
+        'INSERT INTO transactions (user_id, type, amount, description, tx_hash, chain_id, investment_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          targetId,
+          'admin_grant',
+          tokenAmount,
+          `${description} Plan restored: ${restore.planRestored} XIT${restore.walletRestored > 0 ? `; wallet restored: ${restore.walletRestored}` : ''}.`,
+          txRef,
+          payout.chainId,
+          restore.investmentId,
+          restore.onChainAmount > 0 ? payout.onChainStatus : 'demo',
+        ]
+      );
+
+      await conn.commit();
+
+      return res.json({
+        success: true,
+        targetId: Number(targetId),
+        username: user.username,
+        amount: tokenAmount,
+        compensationKind: kind,
+        planRestored: restore.planRestored,
+        walletRestored: restore.walletRestored,
+        onChainReturned: restore.onChainAmount,
+        investmentId: restore.investmentId,
+        sellOrderId: restore.sellOrderId,
+        credited: payout.credited,
+        chainMode: payout.chainMode,
+        txHash: payout.txHash,
+        chainId: payout.chainId,
+        onChainStatus: payout.onChainStatus,
+        walletAddress: user.wallet_address,
       });
     }
 

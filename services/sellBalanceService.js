@@ -159,6 +159,77 @@ export async function deductInvestmentSellable(conn, investmentId, userId, slice
   await applyPrincipalReductionAfterSell(conn, investmentId, userId, amount);
 }
 
+/** Undo flexible principal reduction after a failed sell compensation. */
+export async function restorePrincipalAfterSellCompensation(conn, investmentId, userId, slice) {
+  const amount = Number(slice);
+  if (amount <= 0) return;
+
+  const [rows] = await conn.query(
+    'SELECT id, plan_type, status, token_amount, total_return, roi_received, end_date FROM investments WHERE id = ? AND user_id = ? FOR UPDATE',
+    [investmentId, userId]
+  );
+  if (rows.length === 0) return;
+
+  const inv = rows[0];
+  if (inv.plan_type !== 'flexible') return;
+
+  const newPrincipal = roundXit(Number(inv.token_amount) + amount);
+  const plan = PLAN_CONFIG.flexible;
+  const roiReceived = Number(inv.roi_received);
+  const additionalCap = roundXit(calcTotalReturn(newPrincipal, plan));
+  const newTotalReturn = roundXit(roiReceived + additionalCap);
+
+  let newStatus = 'active';
+  const endDate = inv.end_date ? String(inv.end_date).slice(0, 10) : null;
+  const today = getISTDateString();
+  if (endDate && today >= endDate) {
+    newStatus = 'completed';
+  }
+
+  await conn.query(
+    'UPDATE investments SET token_amount = ?, total_return = ?, status = ? WHERE id = ? AND user_id = ?',
+    [newPrincipal, newTotalReturn, newStatus, investmentId, userId]
+  );
+}
+
+/** Increase plan sellable (and flexible principal) — inverse of deductInvestmentSellable. */
+export async function restoreInvestmentSellable(conn, investmentId, userId, slice) {
+  const amount = Number(slice);
+  if (amount <= 0) return;
+
+  await conn.query(
+    'UPDATE investments SET sellable_amount = sellable_amount + ? WHERE id = ? AND user_id = ?',
+    [amount, investmentId, userId]
+  );
+  await restorePrincipalAfterSellCompensation(conn, investmentId, userId, amount);
+}
+
+export async function resolveFlexibleRestoreInvestmentId(conn, userId, investmentId) {
+  if (investmentId) {
+    const id = Number(investmentId);
+    const [rows] = await conn.query(
+      'SELECT id, plan_type FROM investments WHERE id = ? AND user_id = ?',
+      [id, userId]
+    );
+    if (rows.length === 0) throw new Error('Investment not found');
+    if (!['flexible', 'lock', 'flexible_lock'].includes(rows[0].plan_type)) {
+      throw new Error('Invalid investment for sell restore');
+    }
+    return id;
+  }
+
+  const [rows] = await conn.query(
+    `SELECT id FROM investments
+     WHERE user_id = ? AND plan_type = 'flexible' AND status = 'active'
+     ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+    [userId]
+  );
+  if (rows.length === 0) {
+    throw new Error('No active flexible plan found. Specify investmentId or add a flexible plan first.');
+  }
+  return rows[0].id;
+}
+
 /** When a lock / Flexible Lock plan reaches cap, ROI becomes sellable only after end_date. */
 export async function applyLockPlanCompletionSellable(conn, investmentId, planType, newStatus, roiReceived) {
   if ((planType !== 'lock' && planType !== 'flexible_lock') || newStatus !== 'completed') return;
