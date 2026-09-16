@@ -16,7 +16,7 @@ function buildGrantDescription({ compensationKind, note, refTxHash, adminEmail }
   const ref = refTxHash ? String(refTxHash).trim().slice(0, 66) : '';
 
   if (compensationKind === 'sell_failed') {
-    let d = 'Compensation — sell failed (XIT sent, USDT not received). Flexible/plan sellable restored; on-chain return only if sell tx ref provided.';
+    let d = 'Compensation — sell failed (XIT sent, USDT not received). Flexible/plan restored + on-chain XIT return (chain mode).';
     if (ref) d += ` Ref: ${ref}.`;
     if (noteText) d += ` ${noteText}.`;
     return `${d} By ${adminEmail}`;
@@ -585,6 +585,7 @@ export async function grantXit(req, res) {
         onChainReturned: restore.onChainAmount,
         investmentId: restore.investmentId,
         sellOrderId: restore.sellOrderId,
+        sellOrderAutoLinked: restore.sellOrderAutoLinked,
         credited: payout.credited,
         chainMode: payout.chainMode,
         txHash: payout.txHash,

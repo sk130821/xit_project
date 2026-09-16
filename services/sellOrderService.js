@@ -42,6 +42,29 @@ export async function findSellOrderByXitHash(conn, txHash) {
   return rows[0] || null;
 }
 
+/** Latest open sell for member; prefers amount match, else most recent open order. */
+export async function findOpenSellOrderForUser(conn, userId, tokenAmount) {
+  await ensureSellOrdersTable(conn);
+  const uid = Number(userId);
+  const amt = Number(tokenAmount);
+  const [exact] = await conn.query(
+    `SELECT * FROM sell_orders
+     WHERE user_id = ? AND status IN (?, ?, ?)
+       AND ABS(token_amount - ?) < 0.0001
+     ORDER BY id DESC LIMIT 1`,
+    [uid, ...OPEN_STATUSES, amt]
+  );
+  if (exact.length > 0) return exact[0];
+
+  const [latest] = await conn.query(
+    `SELECT * FROM sell_orders
+     WHERE user_id = ? AND status IN (?, ?, ?)
+     ORDER BY id DESC LIMIT 1`,
+    [uid, ...OPEN_STATUSES]
+  );
+  return latest[0] || null;
+}
+
 export async function applySellLedger(conn, {
   userId,
   amountFromXitBalance,
