@@ -2,7 +2,34 @@ import { pool } from '../db.js';
 import bcrypt from 'bcryptjs';
 import { generateUserToken } from '../middleware/auth.js';
 import { getSetting } from '../services/incomeService.js';
-import { creditUserXit } from '../services/tokenPayoutService.js';
+import { creditUserXit, getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
+import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
+import { computeMemberSellable, getInvestmentBalanceStats } from '../services/sellBalanceService.js';
+
+const COMPENSATION_KINDS = new Set(['sell_failed', 'buy_failed', 'general']);
+
+function buildGrantDescription({ compensationKind, note, refTxHash, adminEmail }) {
+  const noteText = note ? String(note).trim().slice(0, 400) : '';
+  const ref = refTxHash ? String(refTxHash).trim().slice(0, 66) : '';
+
+  if (compensationKind === 'sell_failed') {
+    let d = 'Compensation — sell failed (XIT sent, USDT not received). Wallet credit only; plan hold unchanged.';
+    if (ref) d += ` Ref: ${ref}.`;
+    if (noteText) d += ` ${noteText}.`;
+    return `${d} By ${adminEmail}`;
+  }
+  if (compensationKind === 'buy_failed') {
+    let d = 'Compensation — buy failed (USDT paid, XIT not received). Wallet credit only; no new plan lock.';
+    if (ref) d += ` Ref: ${ref}.`;
+    if (noteText) d += ` ${noteText}.`;
+    return `${d} By ${adminEmail}`;
+  }
+
+  if (noteText) {
+    return `Admin XIT grant (income/sellable wallet): ${noteText} — by ${adminEmail}`;
+  }
+  return `Admin XIT grant (income/sellable wallet) by ${adminEmail}`;
+}
 
 export async function getStats(req, res) {
   try {
@@ -170,31 +197,38 @@ export async function getUsers(req, res) {
 }
 
 export async function getUserDetail(req, res) {
+  const conn = await pool.getConnection();
   try {
     const userId = parseInt(req.params.id);
-    if (!userId) return res.status(400).json({ error: 'Invalid user id' });
+    if (!userId) {
+      conn.release();
+      return res.status(400).json({ error: 'Invalid user id' });
+    }
 
-    const [users] = await pool.query(
+    const [users] = await conn.query(
       `SELECT u.*, s.username as sponsor_name, s.referral_code as sponsor_code
        FROM users u
        LEFT JOIN users s ON s.id = u.sponsor_id
        WHERE u.id = ?`,
       [userId]
     );
-    if (users.length === 0) return res.status(404).json({ error: 'User not found' });
+    if (users.length === 0) {
+      conn.release();
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     const u = users[0];
 
-    const [directCount] = await pool.query('SELECT COUNT(*) as c FROM users WHERE sponsor_id = ?', [userId]);
-    const [teamCount] = await pool.query('SELECT COUNT(*) as c FROM referral_relations WHERE upline_id = ?', [userId]);
+    const [directCount] = await conn.query('SELECT COUNT(*) as c FROM users WHERE sponsor_id = ?', [userId]);
+    const [teamCount] = await conn.query('SELECT COUNT(*) as c FROM referral_relations WHERE upline_id = ?', [userId]);
 
-    const [investments] = await pool.query(
+    const [investments] = await conn.query(
       'SELECT * FROM investments WHERE user_id = ? ORDER BY created_at DESC',
       [userId]
     );
 
-    const incomeTypes = ['roi', 'referral_bonus', 'level_bonus', 'reward_bonus', 'commission'];
-    const [incomeTxs] = await pool.query(
+    const incomeTypes = ['roi', 'referral_bonus', 'level_bonus', 'reward_bonus', 'commission', 'admin_grant'];
+    const [incomeTxs] = await conn.query(
       `SELECT t.*, i.plan_type AS investment_plan_type
        FROM transactions t
        LEFT JOIN investments i ON i.id = t.investment_id
@@ -203,14 +237,63 @@ export async function getUserDetail(req, res) {
       [userId, incomeTypes]
     );
 
-    const [buyCount] = await pool.query(
+    const [buyCount] = await conn.query(
       "SELECT COUNT(*) as c FROM transactions WHERE user_id = ? AND type = 'buy'",
       [userId]
     );
 
     const totalIncome = incomeTxs.reduce((sum, t) => sum + Number(t.amount), 0);
 
-    const [team] = await pool.query(
+    const balanceStats = await getInvestmentBalanceStats(conn, userId);
+    const config = await getBlockchainConfig(conn);
+    const chainMode = isBlockchainMode(config.platformMode);
+    let sellBalance = {
+      chainMode,
+      onChainXit: null,
+      planSellable: balanceStats.planSellable,
+      planLocked: balanceStats.planLocked,
+      lockRoiHeld: balanceStats.lockRoiHeld,
+      incomeSellable: 0,
+      totalSellable: 0,
+    };
+
+    if (chainMode && u.wallet_address) {
+      const onChainXit = await getUserOnChainXitBalance(conn, u.wallet_address);
+      const view = computeMemberSellable(
+        onChainXit,
+        balanceStats.planSellable,
+        balanceStats.planLocked,
+        balanceStats.lockRoiHeld,
+        true
+      );
+      sellBalance = {
+        chainMode: true,
+        onChainXit,
+        planSellable: balanceStats.planSellable,
+        planLocked: balanceStats.planLocked,
+        lockRoiHeld: balanceStats.lockRoiHeld,
+        incomeSellable: view.incomeSellable,
+        totalSellable: view.totalSellable,
+      };
+    } else if (!chainMode) {
+      const view = computeMemberSellable(
+        Number(u.xit_balance || 0),
+        balanceStats.planSellable,
+        balanceStats.planLocked,
+        balanceStats.lockRoiHeld
+      );
+      sellBalance = {
+        chainMode: false,
+        onChainXit: null,
+        planSellable: balanceStats.planSellable,
+        planLocked: balanceStats.planLocked,
+        lockRoiHeld: balanceStats.lockRoiHeld,
+        incomeSellable: view.incomeSellable,
+        totalSellable: view.totalSellable,
+      };
+    }
+
+    const [team] = await conn.query(
       `SELECT u.id, u.username, u.email, u.referral_code, u.total_invested, u.total_purchased,
               u.is_active, u.created_at, rr.level
        FROM referral_relations rr
@@ -242,6 +325,7 @@ export async function getUserDetail(req, res) {
         member_status: Number(u.total_invested) > 0 ? 'invested' : 'not_invested',
         buy_tx_count: Number(buyCount[0].c),
         total_income: totalIncome,
+        sell_balance: sellBalance,
       },
       investments: investments.map((inv) => ({
         ...inv,
@@ -272,6 +356,8 @@ export async function getUserDetail(req, res) {
   } catch (err) {
     console.error('getUserDetail error:', err);
     res.status(500).json({ error: 'Server error' });
+  } finally {
+    conn.release();
   }
 }
 
@@ -330,8 +416,12 @@ export async function changeUserPassword(req, res) {
 export async function grantXit(req, res) {
   const conn = await pool.getConnection();
   try {
-    const { targetId, amount, note } = req.body;
+    const { targetId, amount, note, compensationKind, refTxHash } = req.body;
     const tokenAmount = Number(amount);
+    const kind = compensationKind ? String(compensationKind) : 'general';
+    if (!COMPENSATION_KINDS.has(kind)) {
+      return res.status(400).json({ error: 'Invalid compensationKind. Use sell_failed, buy_failed, or general.' });
+    }
 
     if (!targetId || !Number.isFinite(tokenAmount) || tokenAmount <= 0) {
       return res.status(400).json({ error: 'targetId and a positive amount are required' });
@@ -361,10 +451,12 @@ export async function grantXit(req, res) {
 
     const payout = await creditUserXit(conn, targetId, tokenAmount, { skipTotalEarned: true });
 
-    const noteText = note ? String(note).trim().slice(0, 500) : '';
-    const description = noteText
-      ? `Admin XIT grant (no USDT): ${noteText} — by ${req.adminEmail}`
-      : `Admin XIT grant (no USDT) by ${req.adminEmail}`;
+    const description = buildGrantDescription({
+      compensationKind: kind,
+      note,
+      refTxHash,
+      adminEmail: req.adminEmail || 'admin',
+    });
 
     await conn.query(
       'INSERT INTO transactions (user_id, type, amount, description, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -386,6 +478,7 @@ export async function grantXit(req, res) {
       targetId: Number(targetId),
       username: user.username,
       amount: tokenAmount,
+      compensationKind: kind,
       credited: payout.credited,
       chainMode: payout.chainMode,
       txHash: payout.txHash,
