@@ -7,7 +7,11 @@ import {
 } from '../services/blockchainService.js';
 import { createInvestmentForUser, formatRoiDescription, investmentHasIncomeEligible } from '../services/investmentService.js';
 import { creditUserXit } from '../services/tokenPayoutService.js';
-import { applyLockPlanCompletionSellable, unlockMaturedLockRoiSellable } from '../services/sellBalanceService.js';
+import {
+  applyLockPlanCompletionSellable,
+  recordSellIncomeAllocation,
+  unlockMaturedLockRoiSellable,
+} from '../services/sellBalanceService.js';
 import { calculateInvestmentRoiAccrual } from '../services/roiAccrualService.js';
 import { evaluateSellEligibility, runSellPreflight } from '../services/sellValidationService.js';
 import {
@@ -283,7 +287,7 @@ export async function sellTokens(req, res) {
         'UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?',
         [quote.usdtPayout, req.userId]
       );
-      await conn.query(
+      const [txRes] = await conn.query(
         'INSERT INTO transactions (user_id, type, amount, description, tx_hash, chain_id, on_chain_status) VALUES (?, ?, ?, ?, ?, ?, ?)',
         [
           req.userId,
@@ -295,6 +299,15 @@ export async function sellTokens(req, res) {
           'demo',
         ]
       );
+      await recordSellIncomeAllocation(conn, {
+        userId: req.userId,
+        transactionId: txRes.insertId,
+        fromReferral: quote.amountFromReferral,
+        fromLevel: quote.amountFromLevel,
+        fromReward: quote.amountFromReward,
+        fromFlexibleRoi: quote.amountFromFlexRoi,
+        fromFlexiblePrincipal: quote.amountFromInvestments,
+      });
       await conn.commit();
       return res.json({
         success: true,
@@ -335,6 +348,9 @@ export async function sellTokens(req, res) {
         amountFromOtherIncome: quote.amountFromOtherIncome,
         amountFromFlexRoi: quote.amountFromFlexRoi,
         amountFromInvestments: quote.amountFromInvestments,
+        amountFromReferral: quote.amountFromReferral,
+        amountFromLevel: quote.amountFromLevel,
+        amountFromReward: quote.amountFromReward,
         targetInvestmentId: quote.targetInvestmentId,
         flexRoiInvestmentId: quote.flexRoiInvestmentId ?? null,
         xitTxHash: txHash,

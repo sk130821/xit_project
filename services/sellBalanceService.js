@@ -1,29 +1,175 @@
 /**
- * Sellable balance rules:
- * - Flexible plan: sellable_amount (80% slice) while active; ROI base = token_amount (principal)
- * - Lock / Flexible Lock ROI: non-sellable until 4X complete AND lock end_date; held in lock_roi_held
- * - Wallet income (referral, level, reward, flex ROI, …): sellable except lock_roi_held
- * - Sell order: other income → flexible ROI → plan sellable
+ * Sellable = Flexible + Flexible ROI + Referral + Level + Reward
  *
- * walletBalance meaning:
- * - Blockchain (fullInventory): on-chain XIT already includes plan tokens + income
- * - Demo: users.xit_balance is free/income only (plan tokens live on investments)
+ * Token sells are not subtracted from this total.
+ * Not included: Lock, Flexible Lock, and their ROI until 4X + end_date.
  */
 
 import { PLAN_CONFIG, calcTotalReturn } from './investmentService.js';
 import { getISTDateString } from '../utils/istDate.js';
 
-/** Wallet income types (excludes plan ROI tx; flex ROI uses investments.roi_received). */
-export const WALLET_BONUS_INCOME_TYPES = [
+/** Bonuses that count in Sellable (matches dashboard cards). */
+export const SELLABLE_BONUS_INCOME_TYPES = [
   'referral_bonus',
   'level_bonus',
   'reward_bonus',
+];
+
+/** Wallet income types (excludes plan ROI tx; flex ROI uses investments.roi_received). */
+export const WALLET_BONUS_INCOME_TYPES = [
+  ...SELLABLE_BONUS_INCOME_TYPES,
   'commission',
   'admin_grant',
 ];
 
 function roundXit(value) {
   return Math.round((Number(value) || 0) * 1e8) / 1e8;
+}
+
+/** @typedef {{ referral: number; level: number; reward: number; flexibleRoi: number }} IncomeAvailability */
+
+/**
+ * Sellable = Flexible + available Flexible ROI + available Referral + Level + Reward
+ */
+export function composeMemberSellable(flexiblePrincipal, available) {
+  const plan = roundXit(Number(flexiblePrincipal) || 0);
+  const flexRoi = roundXit(Number(available?.flexibleRoi) || 0);
+  const referral = roundXit(Number(available?.referral) || 0);
+  const level = roundXit(Number(available?.level) || 0);
+  const reward = roundXit(Number(available?.reward) || 0);
+  const other = roundXit(referral + level + reward);
+  const income = roundXit(flexRoi + other);
+  return {
+    totalSellable: roundXit(plan + income),
+    incomeSellable: income,
+    otherIncomeSellable: other,
+    flexibleRoiSellable: flexRoi,
+    planSellable: plan,
+    bonusIncomeTotal: other,
+    ledgerIncomeTotal: income,
+    walletSellable: income,
+    flexRoiCap: flexRoi,
+    otherIncomeCap: other,
+    availableIncome: {
+      flexibleRoi: flexRoi,
+      referral,
+      level,
+      reward,
+    },
+  };
+}
+
+export async function sumIncomeTotalsByType(conn, userId) {
+  const [flexRoiRows] = await conn.query(
+    `SELECT COALESCE(SUM(t.amount), 0) AS total
+     FROM transactions t
+     INNER JOIN investments i ON i.id = t.investment_id
+     WHERE t.user_id = ? AND t.type = 'roi' AND i.plan_type = 'flexible'`,
+    [userId]
+  );
+  const [bonusRows] = await conn.query(
+    `SELECT type, COALESCE(SUM(amount), 0) AS total FROM transactions
+     WHERE user_id = ? AND type IN (?)
+     GROUP BY type`,
+    [userId, SELLABLE_BONUS_INCOME_TYPES]
+  );
+  const bonusMap = Object.fromEntries(bonusRows.map((r) => [r.type, Number(r.total)]));
+  return {
+    flexibleRoi: roundXit(Number(flexRoiRows[0].total)),
+    referral: roundXit(bonusMap.referral_bonus || 0),
+    level: roundXit(bonusMap.level_bonus || 0),
+    reward: roundXit(bonusMap.reward_bonus || 0),
+  };
+}
+
+export async function sumSoldBonusAllocations(conn, userId) {
+  try {
+    const [rows] = await conn.query(
+      `SELECT
+        COALESCE(SUM(from_referral), 0) AS referral,
+        COALESCE(SUM(from_level), 0) AS level,
+        COALESCE(SUM(from_reward), 0) AS reward,
+        COALESCE(SUM(from_flexible_roi), 0) AS flexible_roi,
+        COALESCE(SUM(from_flexible_principal), 0) AS flexible_principal
+       FROM sell_income_allocations WHERE user_id = ?`,
+      [userId]
+    );
+    return {
+      referral: roundXit(Number(rows[0].referral)),
+      level: roundXit(Number(rows[0].level)),
+      reward: roundXit(Number(rows[0].reward)),
+      flexibleRoi: roundXit(Number(rows[0].flexible_roi)),
+      flexiblePrincipal: roundXit(Number(rows[0].flexible_principal)),
+    };
+  } catch (err) {
+    if (err.code === 'ER_NO_SUCH_TABLE') {
+      return { referral: 0, level: 0, reward: 0, flexibleRoi: 0, flexiblePrincipal: 0 };
+    }
+    throw err;
+  }
+}
+
+/** Referral → Level → Reward (matches sell deduction order). */
+export function splitBonusSellAmount(amount, available) {
+  let rem = roundXit(Number(amount) || 0);
+  const fromReferral = roundXit(Math.min(rem, Math.max(0, Number(available.referral) || 0)));
+  rem = roundXit(rem - fromReferral);
+  const fromLevel = roundXit(Math.min(rem, Math.max(0, Number(available.level) || 0)));
+  rem = roundXit(rem - fromLevel);
+  const fromReward = roundXit(Math.min(rem, Math.max(0, Number(available.reward) || 0)));
+  return { fromReferral, fromLevel, fromReward };
+}
+
+export async function getMemberSellableBreakdown(conn, userId) {
+  const stats = await getInvestmentBalanceStats(conn, userId);
+  const totals = await sumIncomeTotalsByType(conn, userId);
+  const soldBonus = await sumSoldBonusAllocations(conn, userId);
+
+  const available = {
+    flexibleRoi: roundXit(stats.flexibleRoi),
+    referral: roundXit(Math.max(0, totals.referral - soldBonus.referral)),
+    level: roundXit(Math.max(0, totals.level - soldBonus.level)),
+    reward: roundXit(Math.max(0, totals.reward - soldBonus.reward)),
+  };
+
+  const composed = composeMemberSellable(stats.planSellable, available);
+
+  return {
+    ...composed,
+    incomeTotals: {
+      flexibleRoi: totals.flexibleRoi,
+      referral: totals.referral,
+      level: totals.level,
+      reward: totals.reward,
+    },
+    incomeAvailable: available,
+    planLocked: stats.planLocked,
+    lockRoiHeld: stats.lockRoiHeld,
+  };
+}
+
+export async function sumSellableBonusLedger(conn, userId) {
+  const totals = await sumIncomeTotalsByType(conn, userId);
+  return roundXit(totals.referral + totals.level + totals.reward);
+}
+
+/**
+ * Remaining wallet income helper (legacy). Sellable itself uses composeMemberSellable, not wallet-after-sells.
+ */
+export function pickWalletIncomeSellable(fromWallet, ledgerIncomeTotal, sellCount = 0) {
+  const ledger = ledgerIncomeTotal != null ? roundXit(Number(ledgerIncomeTotal) || 0) : null;
+  if (ledger != null) return ledger;
+  return roundXit(Number(fromWallet) || 0);
+}
+
+/** Tokens unlocked in a chain wallet (excludes lock / flex-lock / held lock ROI). */
+export function unlockedOnChainSellable(onChainBalance, planLocked, lockRoiHeld) {
+  return roundXit(
+    Math.max(
+      0,
+      (Number(onChainBalance) || 0) - (Number(planLocked) || 0) - (Number(lockRoiHeld) || 0)
+    )
+  );
 }
 
 /** Lock / Flexible Lock ROI credited to wallet stays non-sellable until end_date (e.g. 1 year). */
@@ -133,7 +279,8 @@ export function computeWalletIncomeCaps(
   flexibleRoi,
   ledgerIncomeTotal = null,
   subtractPlanSellable = 0,
-  subtractPlanLocked = 0
+  subtractPlanLocked = 0,
+  sellCount = 0
 ) {
   const planOffset = roundXit(Number(subtractPlanSellable) || 0);
   const lockedOffset = roundXit(Number(subtractPlanLocked) || 0);
@@ -145,7 +292,7 @@ export function computeWalletIncomeCaps(
   );
   const flexTracked = roundXit(Number(flexibleRoi) || 0);
   const ledger = ledgerIncomeTotal != null ? roundXit(Number(ledgerIncomeTotal)) : null;
-  const walletSellable = ledger != null ? roundXit(Math.max(fromWallet, ledger)) : fromWallet;
+  const walletSellable = pickWalletIncomeSellable(fromWallet, ledger, sellCount);
   const flexRoiCap = roundXit(Math.min(flexTracked, walletSellable));
   const otherIncomeCap = roundXit(Math.max(0, walletSellable - flexRoiCap));
   return { walletSellable, flexRoiCap, otherIncomeCap, fromWallet, ledgerIncomeTotal: ledger };
@@ -175,16 +322,26 @@ export async function computeWalletIncomeSellableCaps(
   subtractPlanSellable = 0,
   subtractPlanLocked = 0
 ) {
-  const { bonusTotal, ledgerIncomeTotal } = await sumLegacyWalletIncomeLedger(conn, userId, flexibleRoi);
+  const breakdown = await getMemberSellableBreakdown(conn, userId);
   const caps = computeWalletIncomeCaps(
     xitBalance,
     lockRoiHeld,
     flexibleRoi,
-    ledgerIncomeTotal,
+    breakdown.ledgerIncomeTotal,
     subtractPlanSellable,
-    subtractPlanLocked
+    subtractPlanLocked,
+    0
   );
-  return { ...caps, bonusTotal, ledgerIncomeTotal };
+  return {
+    ...caps,
+    walletSellable: breakdown.incomeSellable,
+    flexRoiCap: breakdown.flexibleRoiSellable,
+    otherIncomeCap: breakdown.otherIncomeSellable,
+    availableIncome: breakdown.incomeAvailable,
+    bonusTotal: breakdown.bonusIncomeTotal,
+    ledgerIncomeTotal: breakdown.ledgerIncomeTotal,
+    sellCount: 0,
+  };
 }
 
 /** Sync xit_balance when old accounts have income in transactions but wallet was never credited. */
@@ -207,20 +364,17 @@ export async function reconcileLegacyXitBalance(conn, userId, lockRoiHeld, flexi
   return current;
 }
 
-export function memberSellableViewFromCaps(planSellable, caps, onChainCap = null) {
-  const plan = roundXit(Number(planSellable) || 0);
-  let totalSellable = roundXit(plan + caps.walletSellable);
-  if (onChainCap != null) {
-    totalSellable = roundXit(Math.min(Number(onChainCap) || 0, totalSellable));
-  }
+export function memberSellableViewFromCaps(planSellable, caps, _unlockedCap = null) {
+  const composed = composeMemberSellable(planSellable, {
+    flexibleRoi: caps.flexibleRoiSellable ?? caps.flexRoiCap ?? 0,
+    referral: caps.availableIncome?.referral ?? caps.otherIncomeCap ?? 0,
+    level: caps.availableIncome?.level ?? 0,
+    reward: caps.availableIncome?.reward ?? 0,
+  });
   return {
-    totalSellable,
-    incomeSellable: caps.walletSellable,
-    otherIncomeSellable: caps.otherIncomeCap,
-    flexibleRoiSellable: caps.flexRoiCap,
-    planSellable: plan,
-    bonusIncomeTotal: caps.bonusTotal ?? null,
-    ledgerIncomeTotal: caps.ledgerIncomeTotal ?? null,
+    ...composed,
+    bonusIncomeTotal: caps.bonusTotal ?? composed.bonusIncomeTotal,
+    ledgerIncomeTotal: caps.ledgerIncomeTotal ?? composed.ledgerIncomeTotal,
   };
 }
 
@@ -230,41 +384,70 @@ export function computeMemberFlexAwareSellable(planSellable, flexibleRoi, wallet
   return memberSellableViewFromCaps(planSellable, caps);
 }
 
-export async function computeDemoMemberSellable(conn, userId, planSellable, flexibleRoi, xitBalance, lockRoiHeld) {
-  const caps = await computeWalletIncomeSellableCaps(conn, userId, xitBalance, lockRoiHeld, flexibleRoi);
-  return memberSellableViewFromCaps(planSellable, caps);
+export async function computeDemoMemberSellable(conn, userId, _planSellable, _flexibleRoi, _xitBalance, _lockRoiHeld) {
+  return getMemberSellableBreakdown(conn, userId);
 }
 
-/**
- * Blockchain sellable: plan slices + wallet income (referral/level/… + flex ROI).
- * Uses on-chain balance like demo xit_balance; only lock_roi_held reduces wallet income (not plan_locked).
- */
+/** Blockchain sellable uses the same available-income formula as demo. */
 export async function computeChainMemberSellableForUser(
   conn,
   userId,
-  onChainBalance,
-  planSellable,
-  planLocked,
-  lockRoiHeld,
-  flexibleRoi
+  _onChainBalance,
+  _planSellable,
+  _planLocked,
+  _lockRoiHeld,
+  _flexibleRoi
 ) {
-  const plan = roundXit(Number(planSellable) || 0);
-  const locked = roundXit(Number(planLocked) || 0);
-  const caps = await computeWalletIncomeSellableCaps(
-    conn,
-    userId,
-    onChainBalance,
-    lockRoiHeld,
-    flexibleRoi,
-    plan,
-    locked
-  );
-  return memberSellableViewFromCaps(planSellable, caps, onChainBalance);
+  return getMemberSellableBreakdown(conn, userId);
 }
 
 /** @deprecated Use computeMemberFlexAwareSellable */
 export function computePlanOnlyMemberSellable(planSellable) {
   return computeMemberFlexAwareSellable(planSellable, 0, 0, 0);
+}
+
+let sellIncomeAllocTableReady = false;
+
+export async function ensureSellIncomeAllocationsTable(conn) {
+  if (sellIncomeAllocTableReady) return;
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS sell_income_allocations (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      sell_order_id INT DEFAULT NULL,
+      transaction_id INT DEFAULT NULL,
+      from_referral DECIMAL(20,8) NOT NULL DEFAULT 0,
+      from_level DECIMAL(20,8) NOT NULL DEFAULT 0,
+      from_reward DECIMAL(20,8) NOT NULL DEFAULT 0,
+      from_flexible_roi DECIMAL(20,8) NOT NULL DEFAULT 0,
+      from_flexible_principal DECIMAL(20,8) NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_sia_user (user_id),
+      INDEX idx_sia_sell_order (sell_order_id),
+      INDEX idx_sia_tx (transaction_id)
+    )
+  `);
+  sellIncomeAllocTableReady = true;
+}
+
+export async function recordSellIncomeAllocation(conn, payload) {
+  await ensureSellIncomeAllocationsTable(conn);
+  await conn.query(
+    `INSERT INTO sell_income_allocations (
+      user_id, sell_order_id, transaction_id,
+      from_referral, from_level, from_reward, from_flexible_roi, from_flexible_principal
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      payload.userId,
+      payload.sellOrderId ?? null,
+      payload.transactionId ?? null,
+      roundXit(payload.fromReferral),
+      roundXit(payload.fromLevel),
+      roundXit(payload.fromReward),
+      roundXit(payload.fromFlexibleRoi),
+      roundXit(payload.fromFlexiblePrincipal),
+    ]
+  );
 }
 
 /** Split sell: other income → flexible ROI → plan. */

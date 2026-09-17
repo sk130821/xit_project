@@ -9,12 +9,11 @@ import {
 import { getUserOnChainXitBalance } from './tokenPayoutService.js';
 import {
   allocateSellAmountThreeTier,
-  computeChainMemberSellableForUser,
-  computeDemoMemberSellable,
-  computeWalletIncomeSellableCaps,
   getInvestmentBalanceStats,
+  getMemberSellableBreakdown,
   investmentAllowsSell,
   reconcileLegacyXitBalance,
+  splitBonusSellAmount,
 } from './sellBalanceService.js';
 
 /**
@@ -63,18 +62,8 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
     onChainBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
   }
 
-  const walletBasis = chainMode && onChainBalance != null ? onChainBalance : xitBalance;
-  const planSubtract = chainMode ? sellableFromInvestments : 0;
-  const lockedSubtract = chainMode ? planLocked : 0;
-  const walletCaps = await computeWalletIncomeSellableCaps(
-    conn,
-    userId,
-    walletBasis,
-    lockRoiHeld,
-    flexibleRoi,
-    planSubtract,
-    lockedSubtract
-  );
+  const sellableBreakdown = await getMemberSellableBreakdown(conn, userId);
+  const incomeAvailable = sellableBreakdown.incomeAvailable;
 
   let totalSellable;
   let amountFromXitBalance = 0;
@@ -104,20 +93,9 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
     planCap = invSellable;
     flexRoiCap = invFlexRoi;
 
-    if (chainMode) {
-      const chainView = await computeChainMemberSellableForUser(
-        conn,
-        userId,
-        onChainBalance ?? 0,
-        sellableFromInvestments,
-        planLocked,
-        lockRoiHeld,
-        flexibleRoi
-      );
-      otherIncomeCap = chainView.otherIncomeSellable;
-    } else {
-      otherIncomeCap = walletCaps.otherIncomeCap;
-    }
+    otherIncomeCap = roundXit(
+      incomeAvailable.referral + incomeAvailable.level + incomeAvailable.reward
+    );
 
     totalSellable = roundXit(otherIncomeCap + invFlexRoi + invSellable);
     if (totalSellable <= 0) {
@@ -140,19 +118,10 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
       throw new Error('Link your MetaMask wallet before selling in blockchain mode');
     }
 
-    const chainView = await computeChainMemberSellableForUser(
-      conn,
-      userId,
-      onChainBalance ?? 0,
-      sellableFromInvestments,
-      planLocked,
-      lockRoiHeld,
-      flexibleRoi
-    );
-    totalSellable = chainView.totalSellable;
-    otherIncomeCap = chainView.otherIncomeSellable;
-    flexRoiCap = chainView.flexibleRoiSellable;
-    planCap = chainView.planSellable;
+    totalSellable = sellableBreakdown.totalSellable;
+    otherIncomeCap = sellableBreakdown.otherIncomeSellable;
+    flexRoiCap = sellableBreakdown.flexibleRoiSellable;
+    planCap = sellableBreakdown.planSellable;
 
     if (tokenAmount > totalSellable) {
       throw new Error(`Maximum sellable from your plan is ${totalSellable} XIT`);
@@ -162,18 +131,10 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
       throw new Error('Insufficient XIT balance in your wallet');
     }
   } else {
-    const demoView = await computeDemoMemberSellable(
-      conn,
-      userId,
-      sellableFromInvestments,
-      flexibleRoi,
-      xitBalance,
-      lockRoiHeld
-    );
-    totalSellable = demoView.totalSellable;
-    otherIncomeCap = demoView.otherIncomeSellable;
-    flexRoiCap = demoView.flexibleRoiSellable;
-    planCap = demoView.planSellable;
+    totalSellable = sellableBreakdown.totalSellable;
+    otherIncomeCap = sellableBreakdown.otherIncomeSellable;
+    flexRoiCap = sellableBreakdown.flexibleRoiSellable;
+    planCap = sellableBreakdown.planSellable;
 
     if (tokenAmount > totalSellable) {
       throw new Error('Insufficient sellable XIT tokens');
@@ -186,6 +147,8 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
     amountFromInvestments,
     amountFromXitBalance,
   } = allocateSellAmountThreeTier(tokenAmount, planCap, flexRoiCap, otherIncomeCap));
+
+  const bonusSplit = splitBonusSellAmount(amountFromOtherIncome, incomeAvailable);
 
   if (!chainMode) {
     const walletNeed = roundXit(amountFromOtherIncome + amountFromFlexRoi);
@@ -209,6 +172,9 @@ export async function evaluateSellEligibility(conn, userId, tokenAmount, investm
     amountFromFlexRoi,
     amountFromXitBalance,
     amountFromInvestments,
+    amountFromReferral: bonusSplit.fromReferral,
+    amountFromLevel: bonusSplit.fromLevel,
+    amountFromReward: bonusSplit.fromReward,
     targetInvestmentId,
     flexRoiInvestmentId:
       targetInvestmentId && amountFromFlexRoi > 0 ? targetInvestmentId : null,

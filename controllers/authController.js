@@ -7,8 +7,7 @@ import { getSetting } from '../services/incomeService.js';
 import { getBlockchainConfig, isBlockchainMode } from '../services/blockchainService.js';
 import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
 import {
-  computeChainMemberSellableForUser,
-  computeDemoMemberSellable,
+  getMemberSellableBreakdown,
   getInvestmentBalanceStats,
   reconcileLegacyXitBalance,
 } from '../services/sellBalanceService.js';
@@ -510,53 +509,53 @@ export async function getMe(req, res) {
     let flexibleRoiSellable = 0;
     let incomeSellable = null;
     let walletIncomeSellable = null;
+    let sellableIncome = null;
     let xitBalanceOut = Number(user.xit_balance || 0);
 
     try {
+      const config = await getBlockchainConfig(conn);
+      platformMode = config.platformMode;
+      const chainMode = isBlockchainMode(platformMode);
+
       const balanceStats = await getInvestmentBalanceStats(conn, req.userId);
       planSellable = balanceStats.planSellable;
       planLocked = balanceStats.planLocked;
       lockRoiHeld = balanceStats.lockRoiHeld;
       flexibleRoiSellable = balanceStats.flexibleRoi;
 
-      const config = await getBlockchainConfig(conn);
-      platformMode = config.platformMode;
-      const chainMode = isBlockchainMode(platformMode);
-
-      if (chainMode && user.wallet_address) {
+      if (!chainMode) {
+        xitBalanceOut = await reconcileLegacyXitBalance(
+          conn,
+          req.userId,
+          lockRoiHeld,
+          flexibleRoiSellable
+        );
+      } else if (user.wallet_address) {
         onChainXitBalance = await getUserOnChainXitBalance(conn, user.wallet_address);
-        const chainView = await computeChainMemberSellableForUser(
-          conn,
-          req.userId,
-          onChainXitBalance,
-          planSellable,
-          planLocked,
-          lockRoiHeld,
-          flexibleRoiSellable
-        );
-        totalSellable = chainView.totalSellable;
-        incomeSellable = chainView.incomeSellable;
-        walletIncomeSellable = chainView.incomeSellable;
-      } else {
-        const syncedXit = await reconcileLegacyXitBalance(
-          conn,
-          req.userId,
-          lockRoiHeld,
-          flexibleRoiSellable
-        );
-        const demoView = await computeDemoMemberSellable(
-          conn,
-          req.userId,
-          planSellable,
-          flexibleRoiSellable,
-          syncedXit,
-          lockRoiHeld
-        );
-        totalSellable = demoView.totalSellable;
-        incomeSellable = demoView.incomeSellable;
-        walletIncomeSellable = demoView.incomeSellable;
-        xitBalanceOut = syncedXit;
       }
+
+      const breakdown = await getMemberSellableBreakdown(conn, req.userId);
+      totalSellable = breakdown.totalSellable;
+      incomeSellable = breakdown.incomeSellable;
+      walletIncomeSellable = breakdown.incomeSellable;
+      sellableIncome = {
+        flexible_roi: {
+          total: breakdown.incomeTotals.flexibleRoi,
+          available: breakdown.incomeAvailable.flexibleRoi,
+        },
+        referral: {
+          total: breakdown.incomeTotals.referral,
+          available: breakdown.incomeAvailable.referral,
+        },
+        level: {
+          total: breakdown.incomeTotals.level,
+          available: breakdown.incomeAvailable.level,
+        },
+        reward: {
+          total: breakdown.incomeTotals.reward,
+          available: breakdown.incomeAvailable.reward,
+        },
+      };
     } finally {
       conn.release();
     }
@@ -583,6 +582,7 @@ export async function getMe(req, res) {
       platform_mode: platformMode,
       on_chain_xit_balance: onChainXitBalance,
       total_sellable: totalSellable,
+      sellable_income: sellableIncome,
       is_active: !!user.is_active,
       created_at: user.created_at,
     });

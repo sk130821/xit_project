@@ -3,6 +3,7 @@ import { confirmPayoutTransaction, sendPaymentPayout } from './blockchainService
 import {
   deductFlexibleRoiReceived,
   deductInvestmentSellable,
+  recordSellIncomeAllocation,
 } from './sellBalanceService.js';
 
 function roundXit(value) {
@@ -208,6 +209,17 @@ export async function persistXitReceivedSell(conn, payload) {
       txRes.insertId,
     ]
   );
+
+  await recordSellIncomeAllocation(conn, {
+    userId: payload.userId,
+    sellOrderId: orderRes.insertId,
+    transactionId: txRes.insertId,
+    fromReferral: payload.amountFromReferral,
+    fromLevel: payload.amountFromLevel,
+    fromReward: payload.amountFromReward,
+    fromFlexibleRoi: payload.amountFromFlexRoi,
+    fromFlexiblePrincipal: payload.amountFromInvestments,
+  });
 
   return { sellOrderId: orderRes.insertId, transactionId: txRes.insertId };
 }

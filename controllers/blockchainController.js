@@ -12,8 +12,8 @@ import { createInvestmentForUser } from '../services/investmentService.js';
 import { recordFailedBuyStandalone, upgradeFailedBuyToSuccess } from '../services/tradeFailureService.js';
 import { getUserOnChainXitBalance } from '../services/tokenPayoutService.js';
 import {
-  computeChainMemberSellableForUser,
   getInvestmentBalanceStats,
+  getMemberSellableBreakdown,
 } from '../services/sellBalanceService.js';
 
 export async function getConfig(req, res) {
@@ -94,15 +94,7 @@ export async function getMemberWalletBalance(req, res) {
       });
     }
     const onChainXitBalance = await getUserOnChainXitBalance(conn, walletAddress);
-    const sellableView = await computeChainMemberSellableForUser(
-      conn,
-      req.userId,
-      onChainXitBalance,
-      planSellable,
-      planLocked,
-      lockRoiHeld,
-      flexibleRoi
-    );
+    const sellableView = await getMemberSellableBreakdown(conn, req.userId);
 
     res.json({
       chainMode: true,
@@ -115,6 +107,24 @@ export async function getMemberWalletBalance(req, res) {
       otherIncomeSellable: sellableView.otherIncomeSellable,
       flexibleRoiSellable: sellableView.flexibleRoiSellable,
       totalSellable: sellableView.totalSellable,
+      sellableIncome: {
+        flexible_roi: {
+          total: sellableView.incomeTotals.flexibleRoi,
+          available: sellableView.incomeAvailable.flexibleRoi,
+        },
+        referral: {
+          total: sellableView.incomeTotals.referral,
+          available: sellableView.incomeAvailable.referral,
+        },
+        level: {
+          total: sellableView.incomeTotals.level,
+          available: sellableView.incomeAvailable.level,
+        },
+        reward: {
+          total: sellableView.incomeTotals.reward,
+          available: sellableView.incomeAvailable.reward,
+        },
+      },
     });
   } catch (err) {
     console.error('Wallet balance error:', err);
