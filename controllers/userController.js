@@ -112,7 +112,6 @@ export async function getNetwork(req, res) {
     });
 
     const totalSelfBusiness = mappedMembers.reduce((sum, m) => sum + m.self_business, 0);
-    const totalTeamDownline = mappedMembers.reduce((sum, m) => sum + m.team_business, 0);
     const totalEstDailyLevelIncome = levelStatsFull.reduce(
       (sum, l) => sum + l.estimated_daily_level_income,
       0
@@ -126,7 +125,8 @@ export async function getNetwork(req, res) {
         direct_count: Number(directStats[0].direct_count),
         direct_self_business: Number(directStats[0].direct_self_business),
         total_self_business: totalSelfBusiness,
-        total_team_business: totalSelfBusiness + totalTeamDownline,
+        // Unique downline purchase volume: sum of each member's own total_purchased only (no team overlap).
+        total_team_business: totalSelfBusiness,
         estimated_daily_level_income: totalEstDailyLevelIncome,
         level_stats: levelStatsFull,
       },
